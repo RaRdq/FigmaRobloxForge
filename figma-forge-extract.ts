@@ -253,6 +253,33 @@ async function main() {
       ir.effects = Array.from(node.effects).map(serializeEffect);
     }
 
+    // ── Render Bounds (accounts for drop shadows, blurs, etc.) ──
+    // exportAsync captures the visual render including effects, so the PNG
+    // may be larger than node.width/height. We compute the delta so the
+    // assembler can size the ImageLabel to match the actual PNG dimensions.
+    var hasVisibleEffects = ir.effects && ir.effects.some(function(e) {
+      return e.visible && (e.type === 'DROP_SHADOW' || e.type === 'INNER_SHADOW' || e.type === 'LAYER_BLUR');
+    });
+    if (hasVisibleEffects && 'absoluteRenderBounds' in node && node.absoluteRenderBounds && 'absoluteBoundingBox' in node && node.absoluteBoundingBox) {
+      var arb = node.absoluteRenderBounds;
+      var abb = node.absoluteBoundingBox;
+      // Compute how much the render extends beyond the bounding box on each side
+      var extraLeft = Math.max(0, abb.x - arb.x);
+      var extraTop = Math.max(0, abb.y - arb.y);
+      var renderW = Math.round(arb.width * 100) / 100;
+      var renderH = Math.round(arb.height * 100) / 100;
+      // Only store if render bounds actually differ from node bounds
+      if (Math.abs(renderW - ir.width) > 0.5 || Math.abs(renderH - ir.height) > 0.5) {
+        ir._renderBounds = {
+          x: Math.round((ir.x - extraLeft) * 100) / 100,
+          y: Math.round((ir.y - extraTop) * 100) / 100,
+          width: Math.round(renderW),
+          height: Math.round(renderH),
+        };
+        console.log('[FigmaForge] RenderBounds: ' + node.name + ' node=' + ir.width + 'x' + ir.height + ' render=' + renderW + 'x' + renderH);
+      }
+    }
+
     // Text-specific
     if (node.type === 'TEXT') {
       ir.characters = node.characters || '';

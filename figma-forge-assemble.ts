@@ -162,8 +162,16 @@ function emitPngNode(
   const sizing = mapLayoutSizing(node.layoutSizingHorizontal, node.layoutSizingVertical);
   const sxs = sizing.sizeXScale;
   const sys = sizing.sizeYScale;
-  const sxo = sxs > 0 ? 0 : Math.round(node.width);
-  const syo = sys > 0 ? 0 : Math.round(node.height);
+
+  // Use render bounds if available (includes drop shadow / blur padding)
+  const rb = node._renderBounds;
+  const effectiveW = rb ? rb.width : node.width;
+  const effectiveH = rb ? rb.height : node.height;
+  const effectiveX = rb ? rb.x : node.x;
+  const effectiveY = rb ? rb.y : node.y;
+
+  const sxo = sxs > 0 ? 0 : Math.round(effectiveW);
+  const syo = sys > 0 ? 0 : Math.round(effectiveH);
 
   // Determine the image asset ID
   const assetId = node._resolvedImageId || '';
@@ -176,7 +184,7 @@ function emitPngNode(
   } else if (parentHasAutoLayout) {
     posXml = `<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`;
   } else {
-    posXml = `<UDim2 name="Position"><XS>0</XS><XO>${Math.round(node.x)}</XO><YS>0</YS><YO>${Math.round(node.y)}</YO></UDim2>`;
+    posXml = `<UDim2 name="Position"><XS>0</XS><XO>${Math.round(effectiveX)}</XO><YS>0</YS><YO>${Math.round(effectiveY)}</YO></UDim2>`;
   }
 
   const lines: string[] = [

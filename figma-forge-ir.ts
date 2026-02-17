@@ -230,6 +230,18 @@ export interface FigmaForgeNode {
   _smartFlattened?: boolean;
   /** True if this node is a "Hybrid" node (rasterized background, but preserved dynamic children) */
   _isHybrid?: boolean;
+
+  /**
+   * Render bounds relative to the parent, accounting for effects (drop shadows, blurs).
+   * When present, exportAsync produces a PNG matching these dimensions rather than x/y/width/height.
+   * The assembler should use these for PNG node positioning/sizing to avoid squished content.
+   */
+  _renderBounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }
 
 // ─── Export Manifest ─────────────────────────────────────────────

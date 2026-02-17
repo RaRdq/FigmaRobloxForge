@@ -1,41 +1,46 @@
-# 🔨 FigmaRobloxForge
+# 🔨 FigmaForge
 
-**Pixel-accurate Figma → Roblox UI code generator.**
+**Pixel-accurate Figma → Roblox UI exporter using the PNG-slice pipeline.**
 
-Extract any Figma design and generate production-ready `.rbxmx` files or Luau code that reproduce your UI 1:1 inside Roblox Studio — gradients, strokes, rounded corners, text styles, shadows, and all.
+Extracts any Figma frame and generates a production-ready `.rbxmx` file: every visual element becomes a PNG `ImageLabel`, dynamic text becomes `TextLabel`, and layout hierarchy is preserved as nested `Frame` containers. Drop shadows, gradients, strokes, and effects are all baked into the PNGs — zero approximation, pixel-perfect results.
 
-## ✨ Features
+## ✨ How It Works
 
-- **Pixel-perfect extraction** — captures fills, strokes, gradients, corner radii, text styles, effects, opacity, and layout from Figma
-- **Multiple output formats** — `.rbxmx` XML for direct Studio/Rojo import, or Luau scripts for MCP injection
-- **Text stroke deduplication** — automatically detects Figma's "duplicate text for outline" hack and collapses it into a native `UIStroke`
-- **Image pipeline** — uploads Figma image fills to Roblox Cloud, caches `imageHash → rbxassetid` to avoid re-uploads
-- **Shadow synthesis** — `DROP_SHADOW` and `INNER_SHADOW` effects become proper Roblox Frame siblings
-- **MCP integration** — works with Figma Desktop Bridge + Roblox Studio MCP for fully automated workflows
+**Every Layer Sliced** — FigmaForge classifies each node as one of three types:
+
+| Classification | Roblox Instance | Logic |
+|---|---|---|
+| **PNG** | `ImageLabel` | Any leaf node or subtree without dynamic text → rasterized via `exportAsync` |
+| **Dynamic Text** | `TextLabel` | Text nodes with `$` prefix or matching dynamic patterns (`price`, `level`, etc.) |
+| **Container** | `Frame` | Parent nodes with dynamic text descendants → preserves hierarchy, self rasterized as background |
+
+This means complex Figma features (radial gradients, blurs, complex strokes, shadows) all "just work" because they're baked into the PNG — no need for Roblox approximations.
 
 ## 🏗️ Architecture
 
 ```
 Figma Desktop (MCP Bridge plugin)
         ↓  figma_execute → extraction script runs in Figma sandbox
-  JSON Manifest (Intermediate Representation)
-        ↓  figma-forge-cli.ts
-  Pipeline: dedup → image resolve → generate
+  JSON Manifest (IR with node tree + base64 PNGs)
+        ↓  figma-forge-cli.ts --resolve-images
+  Pipeline: classify → upload PNGs → assemble .rbxmx
         ↓
   .rbxmx file  ──→  Rojo auto-sync  ──→  Roblox Studio
-  (or Luau)         (file watcher)        (StarterGui)
+                     (file watcher)        (StarterGui)
 ```
+
+### Module Map
 
 | Module | Purpose |
 |---|---|
-| `figma-forge-ir.ts` | TypeScript interfaces for the IR — node tree, fills, strokes, text, effects |
-| `figma-forge-extract.ts` | Builds the JS extraction script + text-stroke deduplication pass |
-| `figma-forge-rbxmx.ts` | Generates `.rbxmx` XML from IR (recommended for Rojo workflows) |
-| `figma-forge-luau.ts` | Generates Luau Instance-tree code from IR (for MCP injection) |
-| `figma-forge-images.ts` | Image upload pipeline — base64 → roblox_upload.py → rbxassetid:// |
-| `figma-forge-effects.ts` | Shadow and blur effect synthesis |
-| `figma-forge-animations.ts` | Prototype transition → TweenService mapping |
-| `figma-forge-cli.ts` | CLI orchestrator — ties everything together |
+| `figma-forge-ir.ts` | TypeScript IR interfaces — node tree, fills, strokes, text, effects, `_renderBounds` |
+| `figma-forge-extract.ts` | Builds the JS extraction script for Figma sandbox — node serialization, render bounds capture, layer classification |
+| `figma-forge-assemble.ts` | `.rbxmx` XML generator — node classification, positioning, ImageLabel/TextLabel/Frame emission |
+| `figma-forge-images.ts` | Image upload pipeline — base64 PNG → Roblox Open Cloud API → `rbxassetid://` |
+| `figma-forge-shared.ts` | Font mapping (Figma→Roblox), layout utilities, text classification patterns |
+| `figma-forge-cli.ts` | CLI orchestrator — ties extraction manifest into assembly pipeline |
+| `figma-forge-export.ts` | Export helpers |
+| `figma-forge-animations.ts` | Prototype transition → TweenService animation specs |
 
 ## 🚀 Quick Start
 
@@ -44,8 +49,9 @@ Figma Desktop (MCP Bridge plugin)
 - [Node.js](https://nodejs.org/) 18+
 - [Figma Desktop](https://www.figma.com/downloads/) with the MCP Desktop Bridge plugin running
 - [Rojo](https://rojo.space/) serving your project (for `.rbxmx` auto-sync)
+- Roblox Open Cloud API key in `scripts/roblox-config.json`
 
-### Installation
+### Build
 
 ```bash
 cd tools/FigmaForge
@@ -55,113 +61,94 @@ npx tsc --outDir dist
 
 ### Usage
 
-#### Step 1: Extract manifest from Figma
-
-Use `mcp_figma_figma_execute` to run the extraction script inside Figma targeting your frame's node ID. The script traverses the node tree and returns a JSON manifest with all visual properties.
-
-Save the output to `manifest.json`.
-
-#### Step 2: Generate .rbxmx
-
 ```bash
-# Generate rbxmx (recommended — works with Rojo auto-sync)
-node dist/figma-forge-cli.js --input manifest.json --format rbxmx --output ../../src/StarterGui/MyFrame.rbxmx --verbose
-
-# Generate Luau (alternative — for MCP injection via roblox-studio run_code)
-node dist/figma-forge-cli.js --input manifest.json --format luau --output MyFrame.luau --verbose
+# Generate .rbxmx with image uploads
+npx ts-node figma-forge-cli.ts \
+  --input manifest.json \
+  --output ../../src/StarterGui/MyFrame.rbxmx \
+  --resolve-images \
+  --verbose
 ```
-
-#### Step 3: Import to Roblox
-
-- **Rojo workflow (recommended):** Place `.rbxmx` in `src/StarterGui/` — Rojo auto-syncs it into Studio
-- **MCP workflow:** Execute generated Luau via `mcp_roblox-studio_run_code`
 
 ### CLI Options
 
 ```
 Options:
   --input, -i        Path to FigmaForge manifest JSON
-  --output, -o       Path for generated file (default: <input-name>.rbxmx)
-  --format, -f       Output format: 'rbxmx' (default) or 'luau'
-  --skip-dedup       Skip text-stroke deduplication pass
-  --resolve-images   Upload unresolved IMAGE fills to Roblox (requires API key)
+  --output, -o       Path for generated .rbxmx file
+  --resolve-images   Upload rasterized PNGs to Roblox (requires API key)
   --verbose, -v      Show detailed processing info
   --help, -h         Show help
 ```
 
 ## 📸 Image Pipeline
 
-When your Figma design contains image fills, the extraction captures `imageHash` identifiers. To upload these to Roblox:
+When extraction identifies PNG nodes, they're rasterized via `exportAsync` at 2× scale. The CLI uploads them to Roblox Cloud and patches `rbxassetid://` URIs into the `.rbxmx`.
 
 ### Configuration
 
-The image pipeline needs a Roblox Open Cloud API key. Config priority:
+Config priority for Roblox API credentials:
 
-1. **Environment variables:** `ROBLOX_API_KEY` + `ROBLOX_CREATOR_ID`
-2. **`.env` file** in FigmaForge directory (copy `.env.example`)
-3. **`scripts/roblox-config.json`** in project root
+1. **`scripts/roblox-config.json`** (recommended) — `{ "apiKey": "...", "creatorId": "..." }`
+2. **`.env` file** in FigmaForge directory
+3. **Environment variables:** `ROBLOX_API_KEY` + `ROBLOX_CREATOR_ID`
 
-### Upload flow
+> [!WARNING]
+> **Always clear stale env vars** before running CLI: `$Env:ROBLOX_API_KEY=$null; $Env:ROBLOX_CREATOR_ID=$null`
 
-1. Export image bytes from Figma (base64 PNG via `figma_execute`)
-2. Save to a JSON map: `{ "imageHash": "base64data", ... }`
-3. Run CLI with `--resolve-images`
-4. The pipeline writes temp PNGs, uploads via `roblox_upload.py`, and patches `rbxassetid://` into the output
-5. Results are cached in `.figmaforge-image-cache.json` to avoid re-uploads
+### Caching
 
-## 🧠 Property Mapping
+Uploaded images are cached by content hash in `.figmaforge-image-cache.json`. Re-exports reuse existing `rbxassetid://` URIs. Delete the cache file to force re-uploads.
 
-| Figma Property | Roblox Instance | Notes |
+## 🎯 Render Bounds (Drop Shadow Fix)
+
+> [!IMPORTANT]
+> This is a critical architectural detail for pixel-perfect exports.
+
+Figma's `exportAsync()` renders at `absoluteRenderBounds` (includes effects like drop shadows, blurs), but the node's `.width/.height` properties only report the logical bounding box. Without correction, PNGs with shadow padding get squeezed into too-small ImageLabels.
+
+**FigmaForge handles this automatically:**
+
+1. **Extraction** (`figma-forge-extract.ts`): Compares `absoluteRenderBounds` vs `absoluteBoundingBox` for nodes with visible `DROP_SHADOW`, `INNER_SHADOW`, or `LAYER_BLUR` effects. Stores the delta as `_renderBounds` in the IR.
+2. **Assembly** (`figma-forge-assemble.ts`): Uses `_renderBounds` for ImageLabel position and size when present, falling back to standard `x/y/width/height` otherwise.
+
+**Example impact:**
+
+| Node | Node Bounds | Render Bounds | Shadow Padding |
+|---|---|---|---|
+| UpgradeBtn (drop shadow r:16 s:2) | 130×59 | 172×101 | +21px/side |
+| TitleBar (drop shadow r:4 s:2) | 400×48 | 412×60 | +6px/side |
+
+## 🧠 Node Classification
+
+The assembler (`figma-forge-assemble.ts` → `classifyNode`) determines how each IR node is emitted:
+
+| Criterion | Classification | Output |
 |---|---|---|
-| `SOLID` fill | `BackgroundColor3` | Direct RGB mapping |
-| `GRADIENT_LINEAR` fill | `UIGradient` | ColorSequence + Rotation |
-| `cornerRadius` | `UICorner` | UDim(0, px) |
-| Stroke (INSIDE) | `UIStroke` | ApplyStrokeMode = Border |
-| Drop shadow | Shadow `Frame` sibling | Positioned behind with blur-simulated sizing |
-| Inner shadow | Overlay `Frame` | Alpha gradient over element |
-| Text content | `TextLabel.Text` | Preserves emoji/unicode |
-| Font weight | `FontFace.Weight` | Mapped from Figma weight values |
-| Text alignment | `TextXAlignment` / `TextYAlignment` | LEFT→0, CENTER→1, RIGHT→2 |
-| Opacity | `BackgroundTransparency` | `1 - opacity` inversion |
-| `clipContent` | `ClipsDescendants` | Direct mapping |
-| Image fill | `ImageLabel.Image` | Requires image upload pipeline |
+| Text with `$` prefix or dynamic pattern | `text_dynamic` | `TextLabel` |
+| Has children with dynamic text descendants | `container` | `Frame` (with background ImageLabel if hybrid) |
+| Everything else (leaf, no dynamic children) | `png` | `ImageLabel` |
+
+Dynamic text patterns include: `$Price`, `$Level`, `$SocketIcon_N`, names matching `/^(price|level|score|timer|count|amount|value|quantity|health|progress|rank|unit|socket|stats)/i`, and placeholder content like numbers-only, `x2.0`, `?`, etc.
 
 ## ⚠️ Known Limitations
 
-- **Radial/Angular gradients** → approximated as linear (or rasterized to PNG)
-- **Layer blur / Background blur** → not natively supported in Roblox (skipped)
-- **SPACE_BETWEEN** → no Roblox UIListLayout equivalent, falls back to MIN alignment
-- **Complex text strokes** → dedup pass handles the common Figma outline pattern (N copies with slight offset); exotic stroke setups may need manual tweaking
-- **Vector networks / boolean operations** → must be flattened in Figma first
-- **Component instances** → exported as their expanded tree, not as Roblox component references
-
-## 🔮 Roadmap: PNG Pipeline Pivot
-
-The current node-tree reconstruction approach (Figma vectors → Roblox Frame/UICorner/UIStroke/UIGradient) is being replaced with a **PNG-based pipeline** for non-text elements. This matches how top Roblox games handle image-heavy Kit UIs:
-
-1. **Extract** node tree from Figma (keep current extraction)
-2. **Export** each non-text atom as flat PNG via `exportAsync`
-3. **Upload** PNGs to Roblox Cloud (existing image pipeline)
-4. **Generate** manifest with asset IDs, dimensions, and SliceCenter data
-5. **Text** nodes remain as `TextLabel` instances (only exception)
+- **Roblox font mapping** — Figma fonts are mapped to closest Roblox equivalent (Inter→BuilderSans). Some fonts may not have exact matches.
+- **Per-corner radius** — Roblox `UICorner` only supports uniform radius. Per-corner is approximated with max value.
+- **`SPACE_BETWEEN` layout** — No Roblox equivalent, falls back to `MIN` alignment.
+- **Component instances** — Exported as their expanded tree, not as Roblox component references.
 
 ## 🔧 Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Rojo: `invalid digit found in string` | Negative value in `<token>` XML tag | Ensure all token values are unsigned ints (0+) |
-| Rojo: `duplicate referent` | Two nodes share same referent ID | Check rbxmx generator assigns unique referents |
-| Missing images in Studio | Unresolved image hashes | Run with `--resolve-images` after exporting image bytes |
-| Text looks wrong | Font not available in Roblox | Check font mapping in `figma-forge-shared.ts` |
-| Elements overlap incorrectly | Z-order mismatch | FigmaForge uses `ZIndex` based on Figma layer order |
-
-## 🤝 Contributing
-
-1. Fork the repo
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Compile and test: `npx tsc --outDir dist && node dist/figma-forge-cli.js --input test-manifest.json --format rbxmx`
-4. Commit your changes
-5. Open a Pull Request
+| Rojo: `invalid digit found in string` | Negative value in `<token>` tag | Tokens must be unsigned ints (0+) |
+| Rojo: `duplicate referent` | Two nodes share same referent ID | Check assembler assigns unique referents |
+| Empty/white ImageLabels | Unresolved image hashes | Run with `--resolve-images` |
+| Squished buttons/shadows | Missing render bounds | Ensure extraction captures `absoluteRenderBounds` |
+| `[Flatten]` in node name | Rojo interprets brackets | Post-process: strip `[Flatten]` tags from .rbxmx |
+| Rojo won't re-sync destroyed instance | `$ignoreUnknownInstances: true` | Disconnect and reconnect Rojo plugin |
+| Images fail to load | Stale image cache | Delete `.figmaforge-image-cache.json` and re-run |
 
 ## 📄 License
 
