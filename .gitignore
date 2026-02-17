@@ -37,6 +37,7 @@ _imgs_*.json
 _exec_script.txt
 extraction_*.json
 extraction_script.js
+render_bounds_check.json
 audit_nodes.json
 final_export.*
 output/
