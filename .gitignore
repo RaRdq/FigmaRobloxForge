@@ -25,6 +25,24 @@ dist/
 # Local-only docs
 HANDOVER.md
 
+# Image pipeline
+.figmaforge-image-cache.json
+.figmaforge-tmp/
+.env
+
+# Pipeline temp artifacts
+manifest*.json
+_exported_images*.json
+_imgs_*.json
+_exec_script.txt
+extraction_*.json
+extraction_script.js
+audit_nodes.json
+final_export.*
+output/
+*.rbxmx
+upgrade-modal-*.json
+
 # OS
 .DS_Store
 Thumbs.db

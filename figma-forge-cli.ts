@@ -1,36 +1,27 @@
 /**
- * FigmaForge CLI
+ * FigmaForge CLI v2 — PNG Pipeline
  * 
- * End-to-end pipeline: Extract from Figma → Process IR → Generate .rbxmx or .luau
- * 
- * Usage (via the MCP tool chain):
- *   1. Run extraction script in Figma via figma_execute
- *   2. Save the returned JSON to a .json file
- *   3. Run: npx ts-node figma-forge-cli.ts --input <manifest.json> --output <output.rbxmx>
- *   4. Or: npx ts-node figma-forge-cli.ts --input <manifest.json> --format luau --output <output.luau>
- * 
- * Or programmatically:
- *   import { processManifest } from './figma-forge-cli';
- *   const result = processManifest(jsonString, { format: 'luau' });
+ * Converts Figma designs into complete .rbxmx files using PNG-based export.
+ * Every visual element (including designed text) → ImageLabel with uploaded PNG.
+ * Only dynamic text (runtime values) → TextLabel for game code binding.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { deduplicateTextStrokes, countDedupedNodes } from './figma-forge-extract';
-import { manifestToRbxmx } from './figma-forge-rbxmx';
-import { manifestToLuau } from './figma-forge-luau';
+import { deduplicateTextStrokes } from './figma-forge-extract';
+import { resolveImages } from './figma-forge-images';
+import { assembleRbxmx } from './figma-forge-assemble';
 import type { FigmaForgeManifest } from './figma-forge-ir';
-
-// ─── CLI Argument Parsing ────────────────────────────────────────
-
-type OutputFormat = 'rbxmx' | 'luau';
 
 interface CliArgs {
   input: string;
   output: string;
-  format: OutputFormat;
-  skipDedup: boolean;
+  scale: number;
+  dynamicPrefix: string;
+  resolveImages: boolean;
   verbose: boolean;
+  skipDedup: boolean;
+  mergeImages: string;
 }
 
 function parseArgs(): CliArgs {
@@ -38,189 +29,168 @@ function parseArgs(): CliArgs {
   const result: CliArgs = {
     input: '',
     output: '',
-    format: 'rbxmx',
-    skipDedup: false,
+    scale: 2,
+    dynamicPrefix: '$',
+    resolveImages: false,
     verbose: false,
+    skipDedup: false,
+    mergeImages: '',
   };
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case '--input':
-      case '-i':
-        result.input = args[++i];
-        break;
-      case '--output':
-      case '-o':
-        result.output = args[++i];
-        break;
-      case '--format':
-      case '-f':
-        result.format = args[++i] as OutputFormat;
-        break;
-      case '--skip-dedup':
-        result.skipDedup = true;
-        break;
-      case '--verbose':
-      case '-v':
-        result.verbose = true;
-        break;
-      case '--help':
-      case '-h':
-        console.log(`
-FigmaForge CLI — Figma→Roblox 1:1 Parity Engine
+      case '--input': case '-i': result.input = args[++i]; break;
+      case '--output': case '-o': result.output = args[++i]; break;
+      case '--scale': case '-s': result.scale = parseFloat(args[++i]); break;
+      case '--dynamic-prefix': result.dynamicPrefix = args[++i]; break;
+      case '--resolve-images': result.resolveImages = true; break;
+      case '--merge-images': result.mergeImages = args[++i]; break;
+      case '--verbose': case '-v': result.verbose = true; break;
+      case '--skip-dedup': result.skipDedup = true; break;
+      case '--help': case '-h':
+        console.log(`FigmaForge v2 — PNG Pipeline
 
-Usage:
-  npx ts-node figma-forge-cli.ts --input <manifest.json> --output <output.rbxmx>
-  npx ts-node figma-forge-cli.ts --input <manifest.json> --format luau --output <output.luau>
+Usage: figma-forge --input <manifest.json> [options]
 
 Options:
-  --input, -i      Path to FigmaForge manifest JSON (from figma_execute extraction)
-  --output, -o     Path for generated file (default: <input-name>.rbxmx or .luau)
-  --format, -f     Output format: 'rbxmx' (default) or 'luau' (for Roblox Studio MCP)
-  --skip-dedup     Skip text-stroke deduplication pass
-  --verbose, -v    Show detailed processing info
-  --help, -h       Show this help message
+  --input, -i          Path to FigmaForge manifest JSON (required)
+  --output, -o         Path for generated .rbxmx (default: <input>.rbxmx)
+  --scale, -s          PNG export scale factor (default: 2)
+  --dynamic-prefix     Prefix for dynamic text nodes (default: '$')
+  --resolve-images     Upload exported PNGs to Roblox Cloud
+  --merge-images       Path to exported-images JSON to merge into manifest
+  --skip-dedup         Skip text-stroke deduplication pass
+  --verbose, -v        Show detailed processing info
+  --help, -h           Show this help
 `);
         process.exit(0);
-    }
-  }
-
-  // Auto-detect format from output extension
-  if (result.output && !args.includes('--format') && !args.includes('-f')) {
-    if (result.output.endsWith('.luau') || result.output.endsWith('.lua')) {
-      result.format = 'luau';
     }
   }
 
   return result;
 }
 
-// ─── Processing Pipeline ─────────────────────────────────────────
-
 export interface ProcessOptions {
   skipDedup?: boolean;
+  resolveImages?: boolean;
+  exportedImages?: Record<string, string>;
   verbose?: boolean;
-  format?: OutputFormat;
+  scale?: number;
+  dynamicPrefix?: string;
 }
 
 /**
- * Process a FigmaForge manifest JSON string through the full pipeline.
- * Returns the generated output string (rbxmx XML or Luau code).
- * For luau format, returns the first chunk; use processManifestChunked for all chunks.
+ * Process a manifest JSON string through the PNG pipeline.
+ * Returns the assembled .rbxmx XML string.
  */
-export function processManifest(jsonString: string, options?: ProcessOptions): string {
-  const chunks = processManifestChunked(jsonString, options);
-  return chunks[0];
-}
-
-/**
- * Process manifest and return all output chunks.
- * For rbxmx format, returns a single-element array.
- * For luau format, may return multiple chunks for large trees.
- */
-export function processManifestChunked(jsonString: string, options?: ProcessOptions): string[] {
-  const manifest: FigmaForgeManifest = JSON.parse(jsonString);
-  const verbose = options?.verbose ?? false;
-  const format = options?.format ?? 'rbxmx';
-
-  if (verbose) {
-    console.log(`[FigmaForge] Processing: "${manifest.sourceNodeName}" (${manifest.sourceNodeId})`);
-    console.log(`[FigmaForge]   Source: ${manifest.sourceFile}`);
-    console.log(`[FigmaForge]   Canvas: ${manifest.canvasWidth}×${manifest.canvasHeight}`);
-    console.log(`[FigmaForge]   Format: ${format}`);
-    console.log(`[FigmaForge]   Total nodes: ${manifest.stats.totalNodes}`);
-    console.log(`[FigmaForge]   Text nodes: ${manifest.stats.textNodes}`);
-    console.log(`[FigmaForge]   Image nodes: ${manifest.stats.imageNodes}`);
-    console.log(`[FigmaForge]   Unresolved images: ${manifest.unresolvedImages.length}`);
+export async function processManifestAsync(
+  jsonString: string,
+  options?: ProcessOptions,
+): Promise<string> {
+  let manifestData = JSON.parse(jsonString);
+  if (manifestData.success === true && manifestData.result) {
+    manifestData = manifestData.result;
   }
+  const manifest: FigmaForgeManifest = manifestData;
 
-  // ── Pass 1: Text-stroke deduplication ──
+  // Step 1: Dedup text strokes (still useful for cleaning extraction)
   if (!options?.skipDedup) {
     deduplicateTextStrokes(manifest.root);
-    const dedupCount = countDedupedNodes(manifest);
-    manifest.stats.dedupedTextNodes = dedupCount;
-
-    if (verbose) {
-      console.log(`[FigmaForge]   Deduped text nodes: ${dedupCount} removed`);
-    }
   }
 
-  // ── Pass 2: Image resolution (Kit asset matching) ──
-  if (manifest.unresolvedImages.length > 0 && verbose) {
-    console.log(`[FigmaForge]   ⚠ ${manifest.unresolvedImages.length} images need manual resolution:`);
-    for (const hash of manifest.unresolvedImages) {
-      console.log(`[FigmaForge]     - imageHash: ${hash}`);
-    }
+  // Step 2: Resolve images (upload exported PNGs to Roblox)
+  if (options?.resolveImages && manifest.unresolvedImages && manifest.unresolvedImages.length > 0) {
+    await resolveImages(manifest, options.exportedImages ?? {}, !!options.verbose);
   }
 
-  // ── Pass 3: Generate output ──
-  if (format === 'luau') {
-    const chunks = manifestToLuau(manifest);
-    if (verbose) {
-      const totalLines = chunks.reduce((sum, c) => sum + c.split('\n').length, 0);
-      console.log(`[FigmaForge]   Generated ${chunks.length} chunk(s), ${totalLines} total lines of Luau`);
-    }
-    return chunks;
-  } else {
-    const rbxmx = manifestToRbxmx(manifest);
-    if (verbose) {
-      const nodeCountAfter = countNodesInXml(rbxmx);
-      console.log(`[FigmaForge]   Generated ${rbxmx.length} bytes, ~${nodeCountAfter} Roblox instances`);
-    }
-    return [rbxmx];
-  }
+  // Step 3: Assemble .rbxmx from PNG-based hierarchy
+  const dynamicPrefix = options?.dynamicPrefix ?? '$';
+  return assembleRbxmx(manifest, dynamicPrefix);
 }
 
-/** Quick count of <Item> tags in generated XML */
-function countNodesInXml(xml: string): number {
-  return (xml.match(/<Item /g) || []).length;
+/**
+ * Synchronous variant — skips image upload, generates .rbxmx with existing asset IDs.
+ */
+export function processManifestSync(
+  jsonString: string,
+  options?: ProcessOptions,
+): string {
+  let manifestData = JSON.parse(jsonString);
+  if (manifestData.success === true && manifestData.result) {
+    manifestData = manifestData.result;
+  }
+  const manifest: FigmaForgeManifest = manifestData;
+
+  if (!options?.skipDedup) {
+    deduplicateTextStrokes(manifest.root);
+  }
+
+  const dynamicPrefix = options?.dynamicPrefix ?? '$';
+  return assembleRbxmx(manifest, dynamicPrefix);
 }
 
-// ─── Main ────────────────────────────────────────────────────────
-
-function main(): void {
+async function main(): Promise<void> {
   const args = parseArgs();
-
   if (!args.input) {
-    console.error('[FigmaForge] Error: --input is required. Use --help for usage.');
+    console.error('Error: --input is required. Use --help for usage.');
     process.exit(1);
   }
 
   const inputPath = path.resolve(args.input);
   if (!fs.existsSync(inputPath)) {
-    console.error(`[FigmaForge] Error: Input file not found: ${inputPath}`);
+    console.error(`Error: Input file not found: ${inputPath}`);
     process.exit(1);
   }
 
-  const ext = args.format === 'luau' ? '.luau' : '.rbxmx';
-  const outputPath = args.output
-    ? path.resolve(args.output)
-    : inputPath.replace(/\.json$/, ext);
-
-  console.log(`[FigmaForge] Input:  ${inputPath}`);
-  console.log(`[FigmaForge] Output: ${outputPath} (${args.format})`);
-
   const jsonString = fs.readFileSync(inputPath, 'utf-8');
-  const chunks = processManifestChunked(jsonString, {
-    skipDedup: args.skipDedup,
-    verbose: args.verbose,
-    format: args.format,
-  });
 
-  if (chunks.length === 1) {
-    fs.writeFileSync(outputPath, chunks[0], 'utf-8');
-    console.log(`[FigmaForge] ✅ Successfully generated ${outputPath}`);
-  } else {
-    // Multiple chunks: write as separate files
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkPath = outputPath.replace(/(\.\w+)$/, `.chunk${i + 1}$1`);
-      fs.writeFileSync(chunkPath, chunks[i], 'utf-8');
-      console.log(`[FigmaForge] ✅ Chunk ${i + 1}/${chunks.length}: ${chunkPath}`);
+  if (args.verbose) {
+    console.log(`📦 FigmaForge v2 — PNG Pipeline`);
+    console.log(`   Input: ${inputPath}`);
+    console.log(`   Scale: ${args.scale}x`);
+    console.log(`   Dynamic prefix: "${args.dynamicPrefix}"`);
+    console.log(`   Resolve images: ${args.resolveImages}`);
+  }
+
+  let parsedInput = JSON.parse(jsonString);
+
+  // Merge exported images from separate file (from batched export)
+  if (args.mergeImages) {
+    const mergeImagesPath = path.resolve(args.mergeImages);
+    if (!fs.existsSync(mergeImagesPath)) {
+      console.error(`Error: Merge images file not found: ${mergeImagesPath}`);
+      process.exit(1);
+    }
+    const imagesData = JSON.parse(fs.readFileSync(mergeImagesPath, 'utf-8'));
+    const existingImages = parsedInput.exportedImages || (parsedInput.result?.exportedImages) || {};
+    const mergedImages = { ...existingImages, ...imagesData };
+    if (parsedInput.result) {
+      parsedInput.result.exportedImages = mergedImages;
+    } else {
+      parsedInput.exportedImages = mergedImages;
+    }
+    if (args.verbose) {
+      console.log(`   Merged ${Object.keys(imagesData).length} exported images from ${mergeImagesPath}`);
     }
   }
+
+  const finalJsonString = JSON.stringify(parsedInput);
+
+  const rbxmx = args.resolveImages
+    ? await processManifestAsync(finalJsonString, {
+        ...args,
+        exportedImages: (parsedInput.result || parsedInput).exportedImages || {},
+      })
+    : processManifestSync(finalJsonString, args);
+
+  const outputPath = args.output || inputPath.replace(/\.json$/, '.rbxmx');
+  fs.writeFileSync(outputPath, rbxmx);
+  console.log(`✅ Generated ${outputPath}`);
 }
 
-// Run if called directly
 if (require.main === module) {
-  main();
+  main().catch(err => {
+    console.error(`Fatal: ${err.message}`);
+    process.exit(1);
+  });
 }

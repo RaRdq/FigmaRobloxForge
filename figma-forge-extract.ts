@@ -20,8 +20,12 @@ import type { FigmaForgeManifest } from './figma-forge-ir';
  * 
  * @param nodeId - The Figma node ID to start extraction from (e.g. "3:164")
  * @param maxDepth - Maximum recursion depth (default: 10)
+ * @param skipPngExport - If true, skip base64 PNG rasterization (tree-only mode).
+ *   The rasterQueue is still populated and `unresolvedImages` / `_rasterizedImageHash`
+ *   are still set, but `exportedImages` will be empty. Use `buildRasterExportScript()`
+ *   in a second pass to export the PNGs in batches.
  */
-export function buildExtractionScript(nodeId: string, maxDepth: number = 10): string {
+export function buildExtractionScript(nodeId: string, maxDepth: number = 10, skipPngExport: boolean = false, dynamicPrefix: string = '$'): string {
   // This entire string runs inside Figma's plugin context.
   // It uses figma.getNodeByIdAsync() since the file may use dynamic-page access.
   return `
@@ -32,6 +36,47 @@ async function main() {
   const stats = { totalNodes: 0, dedupedTextNodes: 0, imageNodes: 0, frameNodes: 0, textNodes: 0 };
   const unresolvedImages = [];
   const seenImageHashes = new Set();
+  const exportedImages = {};
+  const rasterQueue = []; // [{irNode, figmaNode}] — nodes needing rasterization
+
+  // ── Helpers ──
+  function uint8ToBase64(bytes) {
+    const CHUNK = 8192;
+    const parts = [];
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      const chunk = bytes.slice(i, i + CHUNK);
+      let binary = '';
+      for (let j = 0; j < chunk.length; j++) {
+        binary += String.fromCharCode(chunk[j]);
+      }
+      parts.push(binary);
+    }
+    const raw = parts.join('');
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let result = '';
+    let i = 0;
+    while (i < raw.length) {
+      const a = raw.charCodeAt(i++);
+      const b = i < raw.length ? raw.charCodeAt(i++) : 0;
+      const c = i < raw.length ? raw.charCodeAt(i++) : 0;
+      const n = (a << 16) | (b << 8) | c;
+      result += chars[(n >> 18) & 63];
+      result += chars[(n >> 12) & 63];
+      result += (i - 2 < raw.length) ? chars[(n >> 6) & 63] : '=';
+      result += (i - 1 < raw.length) ? chars[n & 63] : '=';
+    }
+    return result;
+  }
+
+  function hasNonLinearGradient(fills) {
+    if (!fills) return false;
+    for (const f of fills) {
+      if (f.visible !== false && (f.type === 'GRADIENT_RADIAL' || f.type === 'GRADIENT_ANGULAR')) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   function serializeColor(c) {
     if (!c) return { r: 0, g: 0, b: 0, a: 1 };
@@ -85,10 +130,10 @@ async function main() {
     return {
       type: e.type,
       visible: e.visible !== false,
-      radius: e.radius || 0,
+      radius: e.radius ?? 0,
       color: e.color ? serializeColor(e.color) : undefined,
       offset: e.offset ? { x: e.offset.x, y: e.offset.y } : undefined,
-      spread: e.spread || 0,
+      spread: e.spread ?? 0,
     };
   }
 
@@ -130,15 +175,15 @@ async function main() {
     if (!node.layoutMode || node.layoutMode === 'NONE') return undefined;
     return {
       mode: node.layoutMode,
-      itemSpacing: node.itemSpacing || 0,
-      counterAxisSpacing: node.counterAxisSpacing || 0,
-      paddingTop: node.paddingTop || 0,
-      paddingRight: node.paddingRight || 0,
-      paddingBottom: node.paddingBottom || 0,
-      paddingLeft: node.paddingLeft || 0,
-      primaryAxisAlignItems: node.primaryAxisAlignItems || 'MIN',
-      counterAxisAlignItems: node.counterAxisAlignItems || 'MIN',
-      layoutWrap: node.layoutWrap || 'NO_WRAP',
+      itemSpacing: node.itemSpacing ?? 0,
+      counterAxisSpacing: node.counterAxisSpacing ?? 0,
+      paddingTop: node.paddingTop ?? 0,
+      paddingRight: node.paddingRight ?? 0,
+      paddingBottom: node.paddingBottom ?? 0,
+      paddingLeft: node.paddingLeft ?? 0,
+      primaryAxisAlignItems: node.primaryAxisAlignItems ?? 'MIN',
+      counterAxisAlignItems: node.counterAxisAlignItems ?? 'MIN',
+      layoutWrap: node.layoutWrap ?? 'NO_WRAP',
     };
   }
 
@@ -150,15 +195,15 @@ async function main() {
       node.topLeftRadius !== node.bottomLeftRadius
     )) {
       return [
-        node.topLeftRadius || 0,
-        node.topRightRadius || 0,
-        node.bottomRightRadius || 0,
-        node.bottomLeftRadius || 0,
+        node.topLeftRadius ?? 0,
+        node.topRightRadius ?? 0,
+        node.bottomRightRadius ?? 0,
+        node.bottomLeftRadius ?? 0,
       ];
     }
     // Uniform or mixed
     if ('cornerRadius' in node) {
-      return node.cornerRadius === figma.mixed ? 0 : (node.cornerRadius || 0);
+      return node.cornerRadius === figma.mixed ? 0 : (node.cornerRadius ?? 0);
     }
     return 0;
   }
@@ -186,9 +231,11 @@ async function main() {
       opacity: 'opacity' in node ? node.opacity : 1,
       blendMode: 'blendMode' in node ? node.blendMode : 'NORMAL',
       clipsContent: 'clipsDescendants' in node ? node.clipsDescendants : ('clipsContent' in node ? node.clipsContent : false),
+      reactions: [],
       children: [],
     };
 
+    // ── Serialization of Properties ──
     // Fills
     if ('fills' in node && node.fills && node.fills !== figma.mixed) {
       ir.fills = Array.from(node.fills).map(serializeFill);
@@ -197,8 +244,8 @@ async function main() {
     // Strokes
     if ('strokes' in node && node.strokes) {
       ir.strokes = Array.from(node.strokes).map(serializeStroke);
-      ir.strokeWeight = node.strokeWeight === figma.mixed ? (node.strokeTopWeight || 1) : (node.strokeWeight || 0);
-      ir.strokeAlign = node.strokeAlign || 'INSIDE';
+      ir.strokeWeight = node.strokeWeight === figma.mixed ? (node.strokeTopWeight ?? 1) : (node.strokeWeight ?? 0);
+      ir.strokeAlign = node.strokeAlign ?? 'INSIDE';
     }
 
     // Effects
@@ -210,6 +257,7 @@ async function main() {
     if (node.type === 'TEXT') {
       ir.characters = node.characters || '';
       ir.textStyle = serializeTextStyle(node);
+      ir.textAutoResize = node.textAutoResize || 'NONE';
       stats.textNodes++;
     }
 
@@ -218,24 +266,186 @@ async function main() {
       ir.autoLayout = serializeAutoLayout(node);
     }
 
+    // Layout sizing
+    if ('layoutSizingHorizontal' in node) ir.layoutSizingHorizontal = node.layoutSizingHorizontal || 'FIXED';
+    if ('layoutSizingVertical' in node) ir.layoutSizingVertical = node.layoutSizingVertical || 'FIXED';
+
     // Track frame nodes
-    if (node.type === 'FRAME' || node.type === 'COMPONENT' || node.type === 'INSTANCE') {
-      stats.frameNodes++;
+    if (node.type === 'FRAME' || node.type === 'COMPONENT' || node.type === 'INSTANCE') stats.frameNodes++;
+
+    // ── Layer Slicing Classification (mirrors assembler classifyNode) ──
+    // Every node is exactly one of: DYNAMIC_TEXT, CONTAINER, PNG
+    //   DYNAMIC_TEXT → TextLabel (game code updates at runtime)
+    //   CONTAINER    → Frame (has dynamic text descendants, preserves hierarchy)
+    //   PNG          → ImageLabel with uploaded rbxassetid://
+
+    function isDynText(n) {
+      if (n.type !== 'TEXT') return false;
+      if (n.name.startsWith('${dynamicPrefix}')) return true;
+      var dynNames = [/price/i, /^unit/i, /^socket/i, /^stats/i, /^timer/i, /^count/i,
+        /^amount/i, /^level/i, /^score/i, /^currency/i, /^health/i, /^progress/i,
+        /^rank/i, /^value/i, /^quantity/i];
+      if (dynNames.some(function(p) { return p.test(n.name); })) return true;
+      var text = (n.characters || '').trim();
+      if (!text) return false;
+      var pats = [
+        /^\\{.+\\}$/,
+        /^\\$[\\d.,]+[KMBkmb]?$/,
+        /^[\\d,]+$/,
+        /^\\d+:\\d+$/,
+        /^x[\\d.]+$/i,
+        /^Level \\d+$/i,
+        /^Lv\\.?\\d+$/i,
+        /^Player ?Name$/i,
+        /^0$/,
+        /^\\d+%$/,
+        /^\\.\\.\\./,
+        /\u2192/,
+        /^\\?$/,
+      ];
+      return pats.some(function(p) { return p.test(text); });
     }
 
-    // Children (maintain z-order: first child = bottom)
-    if ('children' in node && node.children) {
-      ir.children = [];
-      for (const child of node.children) {
-        const serialized = serializeNode(child, depth + 1);
-        if (serialized) ir.children.push(serialized);
+    function hasDescDynamic(n) {
+      if (isDynText(n)) return true;
+      if ('children' in n && n.children) {
+        for (var di = 0; di < n.children.length; di++) {
+          if (hasDescDynamic(n.children[di])) return true;
+        }
       }
+      return false;
+    }
+
+    var hasChildren = 'children' in node && node.children && node.children.length > 0;
+    var nodeName = node.name || '';
+    var isFlattenTag = nodeName.includes('[Flatten]') || nodeName.includes('[Raster]') || nodeName.includes('[Flattened]');
+
+    if (isDynText(node)) {
+      // DYNAMIC_TEXT — assembler will emit as TextLabel
+      ir._isDynamic = true;
+    } else if (hasChildren && hasDescDynamic(node)) {
+      // CONTAINER — preserve hierarchy, but export self as background PNG
+      ir._isHybrid = true;
+      if ('exportAsync' in node) {
+        rasterQueue.push({ irNode: ir, figmaNode: node });
+        console.log('[FigmaForge] Container+PNG: ' + node.name + ' (' + node.id + ')');
+      }
+    } else {
+      // PNG — export entire node as single image
+      ir._isFlattened = true;
+      if ('exportAsync' in node) {
+        rasterQueue.push({ irNode: ir, figmaNode: node });
+        console.log('[FigmaForge] PNG slice: ' + node.name + ' (' + node.id + ')');
+      }
+    }
+
+    // Clean name tags
+    if (isFlattenTag) {
+      ir.name = ir.name.replace(/\[Flatten\]\s*/g, '').replace(/\[Raster\]\s*/g, '').replace(/\[Flattened\]\s*/g, '').trim();
+    }
+
+    // ── Children Processing ──
+    // Recurse into CONTAINER nodes only — PNG nodes are flattened
+    if ('children' in node && node.children && !ir._isFlattened) {
+      ir.children = [];
+      for (let ci = 0; ci < node.children.length; ci++) {
+        const child = node.children[ci];
+        const serialized = serializeNode(child, depth + 1);
+        if (serialized) {
+          ir.children.push(serialized);
+        }
+      }
+    }
+
+    // Reactions / Prototype interactions  (#15)
+    if ('reactions' in node && node.reactions && node.reactions.length > 0) {
+      ir.reactions = node.reactions.map(function(r) {
+        const reaction = {
+          trigger: { type: r.trigger ? r.trigger.type : 'ON_CLICK' },
+        };
+        if (r.trigger && r.trigger.delay !== undefined) {
+          reaction.trigger.delay = r.trigger.delay;
+        }
+        if (r.action) {
+          reaction.action = {
+            type: r.action.type,
+            destinationId: r.action.destinationId ?? undefined,
+          };
+          if (r.action.transition) {
+            const t = r.action.transition;
+            reaction.action.transition = {
+              type: t.type,
+              duration: t.duration,
+              easing: {
+                type: t.easing ? t.easing.type : 'EASE_IN_AND_OUT',
+              },
+              direction: t.direction ?? undefined,
+            };
+            if (t.easing && t.easing.type === 'CUSTOM_BEZIER' && t.easing.customBezier) {
+              reaction.action.transition.easing.controlPoints = [
+                t.easing.customBezier.x1, t.easing.customBezier.y1,
+                t.easing.customBezier.x2, t.easing.customBezier.y2,
+              ];
+            }
+          }
+        }
+        return reaction;
+      });
     }
 
     return ir;
   }
 
   const rootIR = serializeNode(root, 0);
+
+  // ── Rasterization Loop (HYBRID AWARE) ──
+  // Phase 1: Always assign raster hashes and record unresolved images
+  for (const { irNode, figmaNode } of rasterQueue) {
+    const hash = 'raster_' + figmaNode.id.replace(/:/g, '_');
+    irNode._rasterizedImageHash = hash;
+    unresolvedImages.push(hash);
+  }
+
+  // Phase 2: Export PNGs (skip if tree-only mode)
+  const SKIP_PNG = ${skipPngExport};
+  if (!SKIP_PNG) {
+    for (const { irNode, figmaNode } of rasterQueue) {
+      try {
+        const hiddenNodes = [];
+        if (irNode._isHybrid) {
+          // Hide Text descendants so they aren't baked into the background PNG
+          async function hideDynamic(n) {
+            if (n.type === 'TEXT') {
+              if (n.visible) {
+                n.visible = false;
+                hiddenNodes.push(n);
+              }
+            } else if ('children' in n && n.children) {
+              for (const childNode of n.children) {
+                await hideDynamic(childNode);
+              }
+            }
+          }
+          await hideDynamic(figmaNode);
+        }
+
+        const pngBytes = await figmaNode.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
+        
+        // Restore visibility
+        for (const n of hiddenNodes) {
+          n.visible = true;
+        }
+
+        const hash = irNode._rasterizedImageHash;
+        exportedImages[hash] = uint8ToBase64(pngBytes);
+        console.log('[FigmaForge] Rasterized ' + (irNode._isHybrid ? 'HYBRID' : 'ATOM') + ': ' + figmaNode.name + ' (' + figmaNode.id + ')');
+      } catch (err) {
+        console.error('[FigmaForge] FAILED to rasterize ' + figmaNode.name + ': ' + err.message);
+      }
+    }
+  } else {
+    console.log('[FigmaForge] Tree-only mode — skipped PNG export for ' + rasterQueue.length + ' nodes');
+  }
 
   return {
     version: '1.0.0',
@@ -247,6 +457,7 @@ async function main() {
     canvasHeight: root.height || 0,
     root: rootIR,
     unresolvedImages: unresolvedImages,
+    exportedImages: exportedImages,
     stats: stats,
   };
 }
@@ -260,17 +471,21 @@ return main();
  * Figma simulates text strokes by duplicating TEXT nodes at ±1-3px offsets
  * with the same content. The "Figma To Roblox" plugin exports all of them.
  * 
- * This pass:
+ * This pass uses MEDIAN-BASED CLUSTERING to separate stroke copies from the survivor:
  * 1. Groups sibling TEXT nodes by (characters, fontSize, fontFamily)
- * 2. If group size > 4 and positions differ by ≤ 3px → it's a stroke simulation
- * 3. Keeps only the LAST node (highest z-index = the "real" colored text on top)
- * 4. Marks all others as _isStrokeDuplicate = true
- * 5. Computes stroke thickness from the max positional offset
+ * 2. Computes median position of the group
+ * 3. Splits into "core" (within 6px of median) and "outliers" (further away)
+ * 4. If core has ≥5 nodes with tight spread (≤8px) → it's a stroke simulation
+ * 5. Identifies survivor: outlier with GRADIENT fill, or the last core node (highest z-index)
+ * 6. Marks all stroke copies as _isStrokeDuplicate = true
+ * 7. Computes stroke thickness from core positional offset
  * 
- * Returns the inferred stroke thickness for the surviving node.
+ * Returns the count of removed duplicate nodes.
  */
-export function deduplicateTextStrokes(parent: { children: any[] }): void {
-  if (!parent.children || parent.children.length === 0) return;
+export function deduplicateTextStrokes(parent: { children: any[] }): number {
+  if (!parent || !parent.children || !Array.isArray(parent.children) || parent.children.length === 0) return 0;
+
+  let removedCount = 0;
 
   // Group TEXT children by content fingerprint
   const textGroups = new Map<string, any[]>();
@@ -288,67 +503,327 @@ export function deduplicateTextStrokes(parent: { children: any[] }): void {
 
   // Process each group
   for (const [_key, group] of textGroups) {
-    // Need at least 5 duplicates to qualify as stroke simulation
-    // (Figma typically uses 8-13 copies at cardinal + ordinal offsets)
+    // Need at least 5 nodes to qualify as stroke simulation
+    // (Figma typically uses 8-13 copies at cardinal + ordinal offsets + 1 real text)
     if (group.length < 5) continue;
 
-    // Check positional spread — all nodes should be within 3px of each other
-    const xs = group.map((n: any) => n.x);
-    const ys = group.map((n: any) => n.y);
-    const xSpread = Math.max(...xs) - Math.min(...xs);
-    const ySpread = Math.max(...ys) - Math.min(...ys);
+    // ── Median-based clustering ──
+    // Compute median x/y to find the center of the stroke cluster
+    const xs = group.map((n: any) => n.x as number).sort((a, b) => a - b);
+    const ys = group.map((n: any) => n.y as number).sort((a, b) => a - b);
+    const medianX = xs[Math.floor(xs.length / 2)];
+    const medianY = ys[Math.floor(ys.length / 2)];
 
-    if (xSpread > 8 || ySpread > 8) continue; // Not a stroke simulation (threshold accounts for ±3px stroke + drop shadow offset)
+    // Split into core (stroke copies near median) and outliers (potential survivors)
+    const CLUSTER_RADIUS = 6; // px from median to qualify as stroke copy
+    const core: any[] = [];
+    const outliers: any[] = [];
+    for (const node of group) {
+      const dx = Math.abs(node.x - medianX);
+      const dy = Math.abs(node.y - medianY);
+      if (dx <= CLUSTER_RADIUS && dy <= CLUSTER_RADIUS) {
+        core.push(node);
+      } else {
+        outliers.push(node);
+      }
+    }
 
-    // This IS a stroke simulation group.
-    // The last node in the array (highest z-index) is the "real" text.
-    // All others are stroke duplicates.
-    const strokeThickness = Math.max(xSpread, ySpread) / 2;
+    // Core must have ≥5 tightly clustered nodes to be a stroke simulation
+    if (core.length < 5) continue;
 
-    // Keep only the last node (top of z-stack)
-    for (let i = 0; i < group.length - 1; i++) {
-      group[i]._isStrokeDuplicate = true;
+    // Verify core has tight positional spread (≤8px in both axes)
+    const coreXs = core.map((n: any) => n.x);
+    const coreYs = core.map((n: any) => n.y);
+    const coreXSpread = Math.max(...coreXs) - Math.min(...coreXs);
+    const coreYSpread = Math.max(...coreYs) - Math.min(...coreYs);
+    if (coreXSpread > 8 || coreYSpread > 8) continue;
+
+    // ── Identify survivor ──
+    // Priority: outlier with gradient fill > outlier with effects > last node in group (highest z-index)
+    let survivor: any = null;
+
+    // Check outliers for gradient-fill nodes (the "real" text is often gradient)
+    for (const node of outliers) {
+      const hasGradient = node.fills?.some((f: any) => f.type?.startsWith('GRADIENT_') && f.visible);
+      const hasEffects = node.effects?.some((e: any) => e.visible);
+      if (hasGradient || hasEffects) {
+        survivor = node;
+        break;
+      }
+    }
+
+    // If no gradient outlier, try any outlier
+    if (!survivor && outliers.length > 0) {
+      survivor = outliers[outliers.length - 1];
+    }
+
+    // If no outliers at all, use the last core node (highest z-index in children array)
+    if (!survivor) {
+      survivor = group[group.length - 1];
+    }
+
+    // ── Mark stroke copies ──
+    const strokeThickness = Math.max(coreXSpread, coreYSpread) / 2;
+
+    for (const node of group) {
+      if (node === survivor) continue;
+      node._isStrokeDuplicate = true;
+      removedCount++;
     }
 
     // The surviving node gets stroke metadata
-    const survivor = group[group.length - 1];
-    survivor._inferredStrokeThickness = strokeThickness > 0 ? Math.ceil(strokeThickness) : 2;
+    if (survivor) {
+      survivor._inferredStrokeThickness = strokeThickness > 0 ? Math.ceil(strokeThickness) : 2;
+    }
 
-    // Detect stroke color from the duplicates (they all share the same fill color)
-    // The stroke color is the fill of the duplicate nodes (usually darker/outline color)
-    if (group.length > 1 && group[0].fills && group[0].fills.length > 0) {
-      const strokeFill = group[0].fills.find((f: any) => f.type === 'SOLID' && f.visible);
-      if (strokeFill && strokeFill.color) {
+    // Detect stroke color from the core duplicates (they share the same fill color)
+    const strokeSample = core.find((n: any) => n !== survivor);
+    if (strokeSample?.fills?.length > 0) {
+      const strokeFill = strokeSample.fills.find((f: any) => f.type === 'SOLID' && f.visible);
+      if (strokeFill?.color) {
         survivor._inferredStrokeColor = strokeFill.color;
       }
     }
   }
 
   // Remove flagged duplicates from children array
+  const beforeLen = parent.children.length;
   parent.children = parent.children.filter((c: any) => !c._isStrokeDuplicate);
 
   // Recurse into remaining children
   for (const child of parent.children) {
-    if (child.children) {
-      deduplicateTextStrokes(child);
+    if (child && child.children) {
+      removedCount += deduplicateTextStrokes(child);
     }
   }
+
+  return removedCount;
 }
 
 /**
  * Count how many nodes were removed by deduplication.
+ * @deprecated Use the return value of deduplicateTextStrokes() instead.
  */
 export function countDedupedNodes(manifest: FigmaForgeManifest): number {
-  const beforeCount = manifest.stats.totalNodes;
-  let afterCount = 0;
+  let nodeCount = 0;
 
   function countNodes(node: any): void {
-    afterCount++;
+    nodeCount++;
     if (node.children) {
       for (const child of node.children) countNodes(child);
     }
   }
 
   countNodes(manifest.root);
-  return beforeCount - afterCount;
+  return manifest.stats.totalNodes - nodeCount;
+}
+
+/**
+ * Builds a self-contained JavaScript string that, when executed in Figma's
+ * plugin sandbox via figma_execute, exports all specified image hashes
+ * as base64 PNG data.
+ * 
+ * Must run AFTER buildExtractionScript — uses the unresolvedImages list
+ * from that first extraction pass.
+ * 
+ * Uses the correct Figma plugin API chain:
+ *   figma.getImageByHash(hash) → Image → getBytesAsync() → Uint8Array → base64
+ * 
+ * @param imageHashes - Array of image hashes from manifest.unresolvedImages
+ * @returns JavaScript string to execute via figma_execute
+ */
+export function buildImageExportScript(imageHashes: string[]): string {
+  if (imageHashes.length === 0) {
+    return `return { exportedImages: {}, stats: { total: 0, exported: 0, failed: 0 }, errors: [] };`;
+  }
+
+  // Embed the hashes directly into the generated script
+  const hashesJson = JSON.stringify(imageHashes);
+
+  return `
+async function exportImages() {
+  const hashes = ${hashesJson};
+  const exportedImages = {};
+  const errors = [];
+  let exported = 0;
+  let failed = 0;
+
+  // Uint8Array → base64 (no btoa in plugin context, manual conversion)
+  function uint8ToBase64(bytes) {
+    const CHUNK = 8192;
+    const parts = [];
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      const chunk = bytes.slice(i, i + CHUNK);
+      let binary = '';
+      for (let j = 0; j < chunk.length; j++) {
+        binary += String.fromCharCode(chunk[j]);
+      }
+      parts.push(binary);
+    }
+    const raw = parts.join('');
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let result = '';
+    let i = 0;
+    while (i < raw.length) {
+      const a = raw.charCodeAt(i++);
+      const b = i < raw.length ? raw.charCodeAt(i++) : 0;
+      const c = i < raw.length ? raw.charCodeAt(i++) : 0;
+      const n = (a << 16) | (b << 8) | c;
+      result += chars[(n >> 18) & 63];
+      result += chars[(n >> 12) & 63];
+      result += (i - 2 < raw.length) ? chars[(n >> 6) & 63] : '=';
+      result += (i - 1 < raw.length) ? chars[n & 63] : '=';
+    }
+    return result;
+  }
+
+  for (const hash of hashes) {
+    try {
+      const img = figma.getImageByHash(hash);
+      if (!img) {
+        errors.push('getImageByHash returned null for: ' + hash.slice(0, 12));
+        failed++;
+        continue;
+      }
+      const bytes = await img.getBytesAsync();
+      if (!bytes || bytes.length === 0) {
+        errors.push('getBytesAsync returned empty for: ' + hash.slice(0, 12));
+        failed++;
+        continue;
+      }
+      exportedImages[hash] = uint8ToBase64(bytes);
+      exported++;
+    } catch (err) {
+      errors.push('Failed to export ' + hash.slice(0, 12) + ': ' + (err.message || String(err)));
+      failed++;
+    }
+  }
+
+  return {
+    exportedImages: exportedImages,
+    stats: { total: hashes.length, exported: exported, failed: failed },
+    errors: errors,
+  };
+}
+return exportImages();
+`;
+}
+
+/**
+ * Builds a JavaScript string that, when executed in Figma's plugin sandbox,
+ * exports specified **nodes** as PNG (via exportAsync) and returns base64 data.
+ * 
+ * Use this AFTER `buildExtractionScript(nodeId, maxDepth, skipPngExport=true)` — 
+ * the extraction produces `unresolvedImages` list with `raster_<nodeId>` hashes.
+ * Parse those to get the original Figma node IDs, then batch them here.
+ * 
+ * For hybrid nodes (containers with dynamic text), text descendants are hidden
+ * before export so they aren't baked into the background PNG.
+ * 
+ * @param entries - Array of { nodeId, rasterHash, isHybrid } to export
+ * @param scale - Export scale factor (default: 2)
+ * @returns JavaScript string to execute via figma_execute (timeout: 30000)
+ */
+export function buildRasterExportScript(
+  entries: { nodeId: string; rasterHash: string; isHybrid?: boolean }[],
+  scale: number = 2,
+): string {
+  if (entries.length === 0) {
+    return `return { exportedImages: {}, stats: { total: 0, exported: 0, failed: 0 }, errors: [] };`;
+  }
+
+  const entriesJson = JSON.stringify(entries);
+
+  return `
+async function exportRasterNodes() {
+  const entries = ${entriesJson};
+  const exportedImages = {};
+  const errors = [];
+  let exported = 0;
+  let failed = 0;
+
+  function uint8ToBase64(bytes) {
+    const CHUNK = 8192;
+    const parts = [];
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      const chunk = bytes.slice(i, i + CHUNK);
+      let binary = '';
+      for (let j = 0; j < chunk.length; j++) {
+        binary += String.fromCharCode(chunk[j]);
+      }
+      parts.push(binary);
+    }
+    const raw = parts.join('');
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let result = '';
+    let i = 0;
+    while (i < raw.length) {
+      const a = raw.charCodeAt(i++);
+      const b = i < raw.length ? raw.charCodeAt(i++) : 0;
+      const c = i < raw.length ? raw.charCodeAt(i++) : 0;
+      const n = (a << 16) | (b << 8) | c;
+      result += chars[(n >> 18) & 63];
+      result += chars[(n >> 12) & 63];
+      result += (i - 2 < raw.length) ? chars[(n >> 6) & 63] : '=';
+      result += (i - 1 < raw.length) ? chars[n & 63] : '=';
+    }
+    return result;
+  }
+
+  async function hideTextDescendants(node) {
+    const hidden = [];
+    async function walk(n) {
+      if (n.type === 'TEXT' && n.visible) {
+        n.visible = false;
+        hidden.push(n);
+      } else if ('children' in n && n.children) {
+        for (const c of n.children) await walk(c);
+      }
+    }
+    await walk(node);
+    return hidden;
+  }
+
+  for (const entry of entries) {
+    try {
+      const node = await figma.getNodeByIdAsync(entry.nodeId);
+      if (!node) {
+        errors.push('Node not found: ' + entry.nodeId);
+        failed++;
+        continue;
+      }
+      if (!('exportAsync' in node)) {
+        errors.push('Node cannot export: ' + entry.nodeId);
+        failed++;
+        continue;
+      }
+
+      // Hybrid: hide text before export
+      let hidden = [];
+      if (entry.isHybrid) {
+        hidden = await hideTextDescendants(node);
+      }
+
+      const pngBytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: ${scale} } });
+
+      // Restore
+      for (const n of hidden) n.visible = true;
+
+      exportedImages[entry.rasterHash] = uint8ToBase64(pngBytes);
+      exported++;
+      console.log('[FigmaForge] Exported ' + entry.rasterHash + ' (' + (pngBytes.length / 1024).toFixed(1) + 'KB)');
+    } catch (err) {
+      errors.push('Failed ' + entry.nodeId + ': ' + (err.message || String(err)));
+      failed++;
+    }
+  }
+
+  return {
+    exportedImages: exportedImages,
+    stats: { total: entries.length, exported: exported, failed: failed },
+    errors: errors,
+  };
+}
+return exportRasterNodes();
+`;
 }
