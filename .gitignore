@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Generated test/e2e output files
+e2e-*.luau
+e2e-*.json
+test-output.*
+test-manifest.json
+
+# Temporary scripts
+run-e2e-*.ts
+
+# Build output
+dist/
+*.js
+*.js.map
+*.d.ts
+!figma-forge-ir.ts
+
+# IDE
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
