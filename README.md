@@ -76,15 +76,6 @@ Or use programmatically with an AI agent (Claude, Gemini, etc.) via MCP:
    - `UIGradient` for gradient fills, `UIStroke` for borders
    - Absolute pixel positioning via `UDim2.new(0, px, 0, px)`
 
-## 🗺️ Roadmap
-
-- [ ] Image asset pipeline (auto-upload textures)
-- [ ] Auto-layout → UIListLayout mapping
-- [ ] Effect mapping (shadows, blurs)
-- [ ] Component/variant detection
-- [ ] Fusion reactive code generation
-- [ ] Interactive CLI with progress bars
-
 ## 🤝 Contributing
 
 Contributions welcome! This tool was built to solve a real problem — getting beautiful Figma designs into Roblox without hours of manual recreation.

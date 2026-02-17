@@ -22,6 +22,9 @@ dist/
 *.swp
 *.swo
 
+# Local-only docs
+HANDOVER.md
+
 # OS
 .DS_Store
 Thumbs.db
