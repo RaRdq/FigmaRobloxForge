@@ -6,6 +6,8 @@ Extracts any Figma frame and generates a production-ready `.rbxmx` file: every v
 
 ## ✨ How It Works
 
+![Figma design (left) exported pixel-perfect to Roblox (right) via FigmaForge](docs/figma-forge-process.png)
+
 **Every Layer Sliced** — FigmaForge classifies each node as one of three types:
 
 | Classification | Roblox Instance | Logic |
