@@ -12,6 +12,7 @@
  */
 
 import type { FigmaForgeManifest } from './figma-forge-ir';
+import { generateDynamicTextJS } from './figma-forge-shared';
 
 /**
  * Builds a self-contained JavaScript string that, when executed in Figma's
@@ -25,7 +26,9 @@ import type { FigmaForgeManifest } from './figma-forge-ir';
  *   are still set, but `exportedImages` will be empty. Use `buildRasterExportScript()`
  *   in a second pass to export the PNGs in batches.
  */
-export function buildExtractionScript(nodeId: string, maxDepth: number = 10, skipPngExport: boolean = false, dynamicPrefix: string = '$'): string {
+export function buildExtractionScript(nodeId: string, maxDepth: number = 10, skipPngExport: boolean = false, dynamicPrefix: string = '$', hideTextMode: 'dynamic' | 'all' | 'none' = 'dynamic'): string {
+  // Generate SSOT dynamic text classification functions
+  const dynTextJS = generateDynamicTextJS(dynamicPrefix);
   // This entire string runs inside Figma's plugin context.
   // It uses figma.getNodeByIdAsync() since the file may use dynamic-page access.
   return `
@@ -38,6 +41,10 @@ async function main() {
   const seenImageHashes = new Set();
   const exportedImages = {};
   const rasterQueue = []; // [{irNode, figmaNode}] — nodes needing rasterization
+  const HIDE_TEXT_MODE = '${hideTextMode}';
+
+  // ── Dynamic Text Classification (SSOT — generated from figma-forge-shared) ──
+  ${dynTextJS}
 
   // ── Helpers ──
   function uint8ToBase64(bytes) {
@@ -306,42 +313,7 @@ async function main() {
     //   CONTAINER    → Frame (has dynamic text descendants, preserves hierarchy)
     //   PNG          → ImageLabel with uploaded rbxassetid://
 
-    function isDynText(n) {
-      if (n.type !== 'TEXT') return false;
-      if (n.name.startsWith('${dynamicPrefix}')) return true;
-      var dynNames = [/price/i, /^unit/i, /^socket/i, /^stats/i, /^timer/i, /^count/i,
-        /^amount/i, /^level/i, /^score/i, /^currency/i, /^health/i, /^progress/i,
-        /^rank/i, /^value/i, /^quantity/i];
-      if (dynNames.some(function(p) { return p.test(n.name); })) return true;
-      var text = (n.characters || '').trim();
-      if (!text) return false;
-      var pats = [
-        /^\\{.+\\}$/,
-        /^\\$[\\d.,]+[KMBkmb]?$/,
-        /^[\\d,]+$/,
-        /^\\d+:\\d+$/,
-        /^x[\\d.]+$/i,
-        /^Level \\d+$/i,
-        /^Lv\\.?\\d+$/i,
-        /^Player ?Name$/i,
-        /^0$/,
-        /^\\d+%$/,
-        /^\\.\\.\\./,
-        /\u2192/,
-        /^\\?$/,
-      ];
-      return pats.some(function(p) { return p.test(text); });
-    }
 
-    function hasDescDynamic(n) {
-      if (isDynText(n)) return true;
-      if ('children' in n && n.children) {
-        for (var di = 0; di < n.children.length; di++) {
-          if (hasDescDynamic(n.children[di])) return true;
-        }
-      }
-      return false;
-    }
 
     var hasChildren = 'children' in node && node.children && node.children.length > 0;
     var nodeName = node.name || '';
@@ -440,12 +412,15 @@ async function main() {
       try {
         const hiddenNodes = [];
         if (irNode._isHybrid) {
-          // Hide Text descendants so they aren't baked into the background PNG
+          // Hide text descendants so they aren't baked into the background PNG
+          // HIDE_TEXT_MODE: 'dynamic' = only isDynText, 'all' = all TEXT, 'none' = skip
           async function hideDynamic(n) {
             if (n.type === 'TEXT') {
-              if (n.visible) {
-                n.visible = false;
-                hiddenNodes.push(n);
+              if (HIDE_TEXT_MODE === 'all' || (HIDE_TEXT_MODE === 'dynamic' && isDynText(n))) {
+                if (n.visible) {
+                  n.visible = false;
+                  hiddenNodes.push(n);
+                }
               }
             } else if ('children' in n && n.children) {
               for (const childNode of n.children) {
@@ -627,23 +602,7 @@ export function deduplicateTextStrokes(parent: { children: any[] }): number {
   return removedCount;
 }
 
-/**
- * Count how many nodes were removed by deduplication.
- * @deprecated Use the return value of deduplicateTextStrokes() instead.
- */
-export function countDedupedNodes(manifest: FigmaForgeManifest): number {
-  let nodeCount = 0;
-
-  function countNodes(node: any): void {
-    nodeCount++;
-    if (node.children) {
-      for (const child of node.children) countNodes(child);
-    }
-  }
-
-  countNodes(manifest.root);
-  return manifest.stats.totalNodes - nodeCount;
-}
+// countDedupedNodes was removed — use deduplicateTextStrokes() return value instead
 
 /**
  * Builds a self-contained JavaScript string that, when executed in Figma's
@@ -754,12 +713,15 @@ return exportImages();
 export function buildRasterExportScript(
   entries: { nodeId: string; rasterHash: string; isHybrid?: boolean }[],
   scale: number = 2,
+  hideTextMode: 'dynamic' | 'all' | 'none' = 'dynamic',
+  dynamicPrefix: string = '$',
 ): string {
   if (entries.length === 0) {
     return `return { exportedImages: {}, stats: { total: 0, exported: 0, failed: 0 }, errors: [] };`;
   }
 
   const entriesJson = JSON.stringify(entries);
+  const dynTextJS = generateDynamicTextJS(dynamicPrefix);
 
   return `
 async function exportRasterNodes() {
@@ -768,6 +730,10 @@ async function exportRasterNodes() {
   const errors = [];
   let exported = 0;
   let failed = 0;
+  const HIDE_TEXT_MODE = '${hideTextMode}';
+
+  // ── Dynamic Text Classification (SSOT — generated from figma-forge-shared) ──
+  ${dynTextJS}
 
   function uint8ToBase64(bytes) {
     const CHUNK = 8192;
@@ -801,8 +767,10 @@ async function exportRasterNodes() {
     const hidden = [];
     async function walk(n) {
       if (n.type === 'TEXT' && n.visible) {
-        n.visible = false;
-        hidden.push(n);
+        if (HIDE_TEXT_MODE === 'all' || (HIDE_TEXT_MODE === 'dynamic' && isDynText(n))) {
+          n.visible = false;
+          hidden.push(n);
+        }
       } else if ('children' in n && n.children) {
         for (const c of n.children) await walk(c);
       }

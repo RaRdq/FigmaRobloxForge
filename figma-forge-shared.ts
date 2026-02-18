@@ -107,6 +107,11 @@ export function getFontFamily(family: string): string {
   return DEFAULT_FONT;
 }
 
+/** Reset warning state between files (e.g. batch/watch mode) */
+export function clearFontWarnings(): void {
+  _warnedFonts.clear();
+}
+
 // ─── Node Classification ─────────────────────────────────────────
 
 /**
@@ -128,6 +133,89 @@ export function isScrollContainer(node: FigmaForgeNode): boolean {
   const overflowY = maxChildBottom > node.height + 2;
   const overflowX = maxChildRight > node.width + 2;
   return overflowY || overflowX;
+}
+
+// ─── Dynamic Text Classification (SSOT) ─────────────────────────
+
+/** Name patterns that indicate dynamic content (e.g. "Price1", "LevelText").
+ *  ALL anchored to ^ to prevent false positives ("Priceless", "Revalue"). */
+export const DYNAMIC_NAME_PATTERNS: RegExp[] = [
+  /^price/i, /^unit/i, /^socket/i, /^stats/i, /^timer/i, /^count/i,
+  /^amount/i, /^level/i, /^score/i, /^currency/i, /^health/i,
+  /^progress/i, /^rank/i, /^value/i, /^quantity/i,
+];
+
+/** Text content patterns that indicate placeholder/dynamic values */
+export const DYNAMIC_TEXT_PATTERNS: RegExp[] = [
+  /^\{.+\}$/,              // {value}, {playerName}
+  /^\$[\d.,]+[KMBkmb]?$/,  // $1,234, $1.2K, $10.5M (currency with suffixes)
+  /^[\d,]+$/,              // 1234, 1,000
+  /^\d+:\d+$/,             // 00:00 (timer)
+  /^x[\d.]+$/i,            // x3, X10, x2.0 — multiplier placeholders
+  /^Level \d+$/i,          // Level 5
+  /^Lv\.?\d+$/i,           // Lv.42, Lv5
+  /^Player ?Name$/i,       // PlayerName, Player Name
+  /^0$/,                   // Single zero placeholder
+  /^\d+%$/,                // 50%
+  /^\.\.\./,               // ... (loading placeholder)
+  /→/,                     // Arrow stats like "$1.2K → $1.5K/s"
+  /^\p{Emoji}+$/u,         // Single emoji (e.g. 👑, ⭐) — often dynamic icons
+  /^\?$/,                  // Single "?" — empty socket placeholder
+];
+
+/** Classify whether a text node contains dynamic (runtime-bound) content.
+ *  Rules (priority order):
+ *    1. Layer name starts with dynamicPrefix (e.g. "$CashAmount") → DYNAMIC
+ *    2. Layer name matches a common game-UI naming pattern → DYNAMIC
+ *    3. Text content matches placeholder patterns → DYNAMIC
+ *    4. Everything else → DESIGNED (export as PNG)
+ */
+export function isDynamicText(node: FigmaForgeNode, dynamicPrefix: string): boolean {
+  if (node.name.startsWith(dynamicPrefix)) return true;
+  if (DYNAMIC_NAME_PATTERNS.some(p => p.test(node.name))) return true;
+  const text = (node.characters ?? '').trim();
+  if (!text) return false;
+  return DYNAMIC_TEXT_PATTERNS.some(p => p.test(text));
+}
+
+/** Check if any descendant of a node contains dynamic text. */
+export function hasDescendantDynamicText(node: FigmaForgeNode, prefix: string): boolean {
+  if (node.type === 'TEXT' && isDynamicText(node, prefix)) return true;
+  if (!node.children) return false;
+  return node.children.some(child => hasDescendantDynamicText(child, prefix));
+}
+
+/**
+ * Generate JavaScript source code for isDynText/hasDescDynamic functions.
+ * Used by extract.ts to embed SSOT patterns into Figma sandbox scripts.
+ * Returns a JS function block that can be inserted into template literals.
+ */
+export function generateDynamicTextJS(dynamicPrefix: string): string {
+  const nameRegexes = DYNAMIC_NAME_PATTERNS.map(r => r.toString()).join(', ');
+  const textRegexes = DYNAMIC_TEXT_PATTERNS.map(r => r.toString()).join(', ');
+
+  return `
+  var _dynNamePats = [${nameRegexes}];
+  var _dynTextPats = [${textRegexes}];
+
+  function isDynText(n) {
+    if (n.type !== 'TEXT') return false;
+    if (n.name.startsWith('${dynamicPrefix}')) return true;
+    if (_dynNamePats.some(function(p) { return p.test(n.name); })) return true;
+    var text = (n.characters || '').trim();
+    if (!text) return false;
+    return _dynTextPats.some(function(p) { return p.test(text); });
+  }
+
+  function hasDescDynamic(n) {
+    if (isDynText(n)) return true;
+    if ('children' in n && n.children) {
+      for (var di = 0; di < n.children.length; di++) {
+        if (hasDescDynamic(n.children[di])) return true;
+      }
+    }
+    return false;
+  }`;
 }
 
 export function robloxClass(node: FigmaForgeNode): string {
@@ -153,6 +241,9 @@ export function robloxClass(node: FigmaForgeNode): string {
  * Returns the bounding box of all visible children.
  */
 export function computeCanvasSize(node: FigmaForgeNode): { width: number; height: number } {
+  if (!node.children || node.children.length === 0) {
+    return { width: Math.ceil(node.width), height: Math.ceil(node.height) };
+  }
   let maxBottom = 0;
   let maxRight = 0;
   for (const child of node.children) {
@@ -251,6 +342,8 @@ export type RobloxVAlign = 'Top' | 'Center' | 'Bottom';
 export interface AutoLayoutMapping {
   fillDirection: RobloxFillDirection;
   padding: number;
+  /** Cross-axis spacing for wrapped layouts (Roblox UIListLayout has no native equivalent yet) */
+  counterAxisSpacing: number;
   horizontalAlignment: RobloxHAlign;
   verticalAlignment: RobloxVAlign;
   wraps: boolean;
@@ -310,6 +403,7 @@ export function mapAutoLayout(node: FigmaForgeNode): AutoLayoutMapping | null {
   return {
     fillDirection,
     padding: Math.round(al.itemSpacing),
+    counterAxisSpacing: Math.round(al.counterAxisSpacing ?? 0),
     horizontalAlignment,
     verticalAlignment,
     wraps: al.layoutWrap === 'WRAP',

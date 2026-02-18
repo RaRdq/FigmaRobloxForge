@@ -35,6 +35,8 @@ manifest*.json
 _exported_images*.json
 _imgs_*.json
 _exec_script.txt
+_extract_code.js
+_*.txt
 extraction_*.json
 extraction_script.js
 render_bounds_check.json
@@ -43,6 +45,9 @@ final_export.*
 output/
 *.rbxmx
 upgrade-modal-*.json
+
+# Dead files
+generate_script.ts
 
 # OS
 .DS_Store

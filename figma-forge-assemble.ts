@@ -14,72 +14,19 @@ import type { FigmaForgeNode, FigmaForgeManifest, FigmaColor } from './figma-for
 import {
   round, escapeXmlAttr, getFontFamily,
   mapAutoLayout, mapLayoutSizing, computeCanvasSize,
-  isScrollContainer,
+  isScrollContainer, isDynamicText, hasDescendantDynamicText,
 } from './figma-forge-shared';
 
+// ─── Constants ───────────────────────────────────────────────────
+const DEFAULT_SCROLLBAR_THICKNESS = 4;
+
+/** Module-level referent counter — always reset at the start of assembleRbxmx().
+ *  Safe because all emit functions are module-internal and only called during assembly. */
 let refCounter = 0;
 function nextRef(): string { return `RBX${refCounter++}`; }
 
-// ─── Text Classification ─────────────────────────────────────────
-
-/**
- * Determine if a text node contains dynamic content (runtime-bound values).
- * 
- * Dynamic text = TextLabel in Roblox (game code updates it).
- * Designed text = PNG ImageLabel (preserves exact visual styling).
- * 
- * Classification rules (in priority order):
- * 1. Layer name starts with dynamicPrefix (e.g. "$CashAmount") → DYNAMIC
- * 2. Content matches placeholder patterns → DYNAMIC
- * 3. Everything else → DESIGNED (export as PNG)
- */
-function isDynamicText(node: FigmaForgeNode, dynamicPrefix: string): boolean {
-  // Rule 1: Explicit prefix in layer name
-  if (node.name.startsWith(dynamicPrefix)) return true;
-
-  // Rule 2: Layer name convention detection (common dynamic naming patterns)
-  const dynamicNamePatterns = [
-    /price/i,            // Price1, Price10, PriceLabel
-    /^unit/i,            // UnitName, UnitLevel
-    /^socket/i,          // SocketIcon_1, SocketMulti_1
-    /^stats/i,           // StatsText, StatsValue
-    /^timer/i,           // Timer, TimerLabel
-    /^count/i,           // Counter, CountLabel
-    /^amount/i,          // Amount, AmountLabel
-    /^level/i,           // Level, LevelText
-    /^score/i,           // Score, ScoreLabel
-    /^currency/i,        // CurrencyAmount
-    /^health/i,          // HealthBar, HealthText
-    /^progress/i,        // ProgressText
-    /^rank/i,            // RankText
-    /^value/i,           // ValueLabel
-    /^quantity/i,        // QuantityText
-  ];
-  if (dynamicNamePatterns.some(p => p.test(node.name))) return true;
-
-  // Rule 3: Placeholder pattern detection on text content
-  const text = (node.characters ?? '').trim();
-  if (!text) return false;
-
-  const placeholderPatterns = [
-    /^\{.+\}$/,              // {value}, {playerName}
-    /^\$[\d.,]+[KMBkmb]?$/,  // $1,234, $1.2K, $10.5M (currency with suffixes)
-    /^[\d,]+$/,              // 1234, 1,000
-    /^\d+:\d+$/,             // 00:00 (timer)
-    /^x[\d.]+$/i,            // x3, X10, x2.0 — multiplier placeholders
-    /^Level \d+$/i,          // Level 5
-    /^Lv\.?\d+$/i,           // Lv.42, Lv5
-    /^Player ?Name$/i,       // PlayerName, Player Name
-    /^0$/,                   // Single zero placeholder
-    /^\d+%$/,                // 50%
-    /^\.\.\./,               // ... (loading placeholder)
-    /→/,                     // Arrow stats like "$1.2K → $1.5K/s"
-    /^\p{Emoji}+$/u,         // Single emoji (e.g. 👑, ⭐) — often dynamic icons
-    /^\?$/,                  // Single "?" — empty socket placeholder
-  ];
-
-  return placeholderPatterns.some(p => p.test(text));
-}
+// ─── Node Classification ─────────────────────────────────────────
+// isDynamicText and hasDescendantDynamicText are imported from figma-forge-shared (SSOT)
 
 /**
  * Classify a node's export strategy.
@@ -111,12 +58,6 @@ function classifyNode(
 
   // No dynamic text anywhere inside → export entire subtree as one PNG
   return 'png';
-}
-
-function hasDescendantDynamicText(node: FigmaForgeNode, prefix: string): boolean {
-  if (node.type === 'TEXT' && isDynamicText(node, prefix)) return true;
-  if (!node.children) return false;
-  return node.children.some(child => hasDescendantDynamicText(child, prefix));
 }
 
 // ─── XML Helpers ─────────────────────────────────────────────────
@@ -214,6 +155,11 @@ function emitPngNode(
 
   if (isRoot) {
     lines.push(`<token name="ZIndexBehavior">1</token>`); // Sibling
+  }
+
+  // Rotation: Figma rotation → Roblox Rotation property (degrees)
+  if (node.rotation && Math.abs(node.rotation) > 0.01) {
+    lines.push(`<float name="Rotation">${round(node.rotation)}</float>`);
   }
 
   lines.push(`</Properties>`);
@@ -360,7 +306,7 @@ function emitContainerNode(
     lines.push(`<token name="AutomaticSize">${sizing.autoSizeToken}</token>`);
   }
 
-  if (node.clipsContent && !isScroll) {
+  if (node.clipsContent && !isScroll && !isRoot) {
     lines.push(`<bool name="ClipsDescendants">true</bool>`);
   }
 
@@ -372,7 +318,7 @@ function emitContainerNode(
   if (isScroll) {
     const canvasSize = computeCanvasSize(node);
     lines.push(`<Vector2 name="CanvasSize"><X>${Math.round(canvasSize.width)}</X><Y>${Math.round(canvasSize.height)}</Y></Vector2>`);
-    lines.push(`<token name="ScrollBarThickness">4</token>`);
+    lines.push(`<token name="ScrollBarThickness">${DEFAULT_SCROLLBAR_THICKNESS}</token>`);
     lines.push(`<bool name="ScrollingEnabled">true</bool>`);
   }
 

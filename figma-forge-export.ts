@@ -16,6 +16,7 @@
  */
 
 import type { FigmaForgeNode } from './figma-forge-ir';
+import { isDynamicText, hasDescendantDynamicText } from './figma-forge-shared';
 
 // ─── Constants ───────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ function walkForExport(
 
   // Text nodes: designed text → export as PNG
   if (node.type === 'TEXT') {
-    if (!isDynamicTextForExport(node, dynamicPrefix)) {
+    if (!isDynamicText(node, dynamicPrefix)) {
       results.push({
         nodeId: node.id,
         name: node.name,
@@ -90,7 +91,7 @@ function walkForExport(
   }
 
   // Container: check if any descendant has dynamic text
-  if (hasDescendantDynamic(node, dynamicPrefix)) {
+  if (hasDescendantDynamicText(node, dynamicPrefix)) {
     // Has dynamic text inside — recurse into children
     for (const child of node.children) {
       walkForExport(child, dynamicPrefix, results);
@@ -107,29 +108,7 @@ function walkForExport(
   }
 }
 
-function isDynamicTextForExport(node: FigmaForgeNode, prefix: string): boolean {
-  if (node.name.startsWith(prefix)) return true;
-  const text = (node.characters ?? '').trim();
-  if (!text) return false;
-  const patterns = [
-    /^\{.+\}$/,
-    /^\$[\d,]+$/,
-    /^[\d,]+$/,
-    /^\d+:\d+$/,
-    /^Level \d+$/i,
-    /^Player ?Name$/i,
-    /^0$/,
-    /^\d+%$/,
-    /^\.\.\./,
-  ];
-  return patterns.some(p => p.test(text));
-}
-
-function hasDescendantDynamic(node: FigmaForgeNode, prefix: string): boolean {
-  if (node.type === 'TEXT' && isDynamicTextForExport(node, prefix)) return true;
-  if (!node.children) return false;
-  return node.children.some(child => hasDescendantDynamic(child, prefix));
-}
+// isDynamicText and hasDescendantDynamicText imported from figma-forge-shared (SSOT)
 
 // ─── Script Generation ──────────────────────────────────────────
 

@@ -98,6 +98,13 @@ function loadConfig(): { apiKey: string; creatorId: string } {
   );
 }
 
+/** Cached config — loaded once per process, not per upload */
+let _cachedConfig: { apiKey: string; creatorId: string } | null = null;
+function getConfig(): { apiKey: string; creatorId: string } {
+  if (!_cachedConfig) _cachedConfig = loadConfig();
+  return _cachedConfig;
+}
+
 // ─── Image Cache ─────────────────────────────────────────────────
 
 const CACHE_PATH = path.join(__dirname, '.figmaforge-image-cache.json');
@@ -155,7 +162,7 @@ async function pollOperation(operationPath: string, apiKey: string, maxAttempts:
  * Returns the assetId string. Throws on failure with actionable error message.
  */
 async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise<string> {
-  const config = loadConfig();
+  const config = getConfig();
   const boundary = `----FigmaForge${Date.now()}`;
   const CRLF = '\r\n';
 
@@ -224,7 +231,7 @@ async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise
 
 /** Collect all nodes with unresolved IMAGE fills OR rasterized gradients */
 function collectImageNodes(node: FigmaForgeNode, results: FigmaForgeNode[]): void {
-  const hasImage = node.fills.some(f => f.type === 'IMAGE' && f.visible && f.imageHash);
+  const hasImage = (node.fills ?? []).some(f => f.type === 'IMAGE' && f.visible && f.imageHash);
   const hasRasterizedGradient = !!node._rasterizedImageHash;
   if ((hasImage || hasRasterizedGradient) && !node._resolvedImageId) {
     results.push(node);
@@ -238,7 +245,7 @@ function collectImageNodes(node: FigmaForgeNode, results: FigmaForgeNode[]): voi
 
 /** Apply resolved IDs to all nodes matching an imageHash or rasterizedImageHash */
 function applyResolvedId(node: FigmaForgeNode, imageHash: string, assetId: string): void {
-  const hasMatch = node.fills.some(f => f.type === 'IMAGE' && f.visible && f.imageHash === imageHash);
+  const hasMatch = (node.fills ?? []).some(f => f.type === 'IMAGE' && f.visible && f.imageHash === imageHash);
   const hasRasterMatch = node._rasterizedImageHash === imageHash;
   if (hasMatch || hasRasterMatch) {
     node._resolvedImageId = `rbxassetid://${assetId}`;
@@ -276,7 +283,7 @@ export async function resolveImages(
   }
 
   // Validate config exists before starting — fail fast, don't bury in result.errors
-  loadConfig();
+  getConfig();
 
   const cache = loadImageCache();
 
