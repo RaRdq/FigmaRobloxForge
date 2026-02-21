@@ -39,6 +39,65 @@ export function escapeXmlAttr(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
+// ─── Unicode Sanitization ────────────────────────────────────────
+
+/**
+ * Sanitize text for Roblox font rendering.
+ * Roblox fonts don't support many Unicode symbols that Figma designers use.
+ * This map converts them to safe ASCII equivalents.
+ */
+const UNICODE_REPLACEMENTS: [RegExp, string][] = [
+  // Close buttons / multiplication signs
+  [/[✕✖✗✘×]/g, 'X'],
+  // Dashes (keep em/en dash as regular hyphen)
+  [/[─━]/g, '-'],
+  // Vertical lines
+  [/[│┃]/g, '|'],
+  // Ellipsis
+  [/…/g, '...'],
+  // Fancy quotes → standard quotes
+  [/[""]/g, '"'],
+  [/['']/g, "'"],
+  // Bullet variants → standard bullet (Roblox supports •)
+  [/[◦▪▸▹►▻‣⁃]/g, '•'],
+  // Arrows (keep → ← ↑ ↓ as Roblox supports these basic ones)
+  [/[⟶⟵⟹⟸➔➜➝➞]/g, '->'],
+];
+
+/** Sanitize text content for safe Roblox rendering. Call BEFORE escapeXmlAttr. */
+export function sanitizeTextForRoblox(text: string): string {
+  let result = text;
+  for (const [pattern, replacement] of UNICODE_REPLACEMENTS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+// ─── Naming Conventions ──────────────────────────────────────────
+
+/** Convention suffixes that FigmaForge recognizes in Figma layer names */
+const CONVENTION_SUFFIXES = ['[Template]', '[Flatten]', '[Scroll]', '[Repeat]'];
+
+/** Check if a node name has the [Template] convention suffix */
+export function isTemplateNode(name: string): boolean {
+  return name.includes('[Template]');
+}
+
+/** Check if a node name has the [Scroll] convention suffix */
+export function isScrollConvention(name: string): boolean {
+  return name.includes('[Scroll]');
+}
+
+/** Strip all FigmaForge convention suffixes from a name, returning the clean display name */
+export function stripConventionSuffix(name: string): string {
+  let clean = name;
+  for (const suffix of CONVENTION_SUFFIXES) {
+    clean = clean.replace(suffix, '');
+  }
+  // Also strip any trailing whitespace from removed suffixes
+  return clean.trim();
+}
+
 // ─── Font Mapping (SSOT) ─────────────────────────────────────────
 
 /** Map Figma font families to Roblox font asset paths */
@@ -116,73 +175,114 @@ export function clearFontWarnings(): void {
 
 /**
  * Determine if a node should become a ScrollingFrame in Roblox.
- * Heuristic: a non-leaf frame with clipsContent AND children that overflow its bounds.
+ * 
+ * Uses 3 detection methods:
+ * 1. Content overflow heuristic (children exceed frame bounds)
+ * 2. [Scroll] name convention suffix
+ * 3. @scroll annotation in Figma node description
  */
 export function isScrollContainer(node: FigmaForgeNode): boolean {
-  if (!node.clipsContent) return false;
-  if (!node.children || node.children.length === 0) return false;
-  // Calculate children bounding box
-  let maxChildBottom = 0;
-  let maxChildRight = 0;
-  for (const child of node.children) {
-    if (!child.visible) continue;
-    maxChildBottom = Math.max(maxChildBottom, child.y + child.height);
-    maxChildRight = Math.max(maxChildRight, child.x + child.width);
-  }
-  // If children overflow the frame by more than a small tolerance (2px for rounding), it scrolls
-  const overflowY = maxChildBottom > node.height + 2;
-  const overflowX = maxChildRight > node.width + 2;
-  return overflowY || overflowX;
+  // Method 1: Figma native scrolling (Prototype > Scroll behavior)
+  if (node.overflowDirection && node.overflowDirection !== 'NONE') return true;
+  // Method 2: [Scroll] name convention
+  if (isScrollConvention(node.name)) return true;
+  // Method 3: @scroll in Figma description
+  if (node.description && /@scroll\b/i.test(node.description)) return true;
+  
+  return false;
 }
 
-// ─── Dynamic Text Classification (SSOT) ─────────────────────────
+// ─── Configuration Types & Defaults ───────────────────────────────
 
-/** Name patterns that indicate dynamic content (e.g. "Price1", "LevelText").
- *  ALL anchored to ^ to prevent false positives ("Priceless", "Revalue"). */
-export const DYNAMIC_NAME_PATTERNS: RegExp[] = [
-  /^price/i, /^unit/i, /^socket/i, /^stats/i, /^timer/i, /^count/i,
-  /^amount/i, /^level/i, /^score/i, /^currency/i, /^health/i,
-  /^progress/i, /^rank/i, /^value/i, /^quantity/i,
-];
+export interface FigmaForgeConfig {
+  dynamicPrefix: string;
+  dynamicNamePatterns: string[];
+  dynamicTextPatterns: string[];
+  interactivePatterns: string[];
+  textExportMode: 'all' | 'dynamic' | 'none';
+  /** When true, emit UDim2.fromScale() proportional to root frame instead of pixel offsets */
+  responsive: boolean;
+  /** Design token color map: hex → token name for runtime theming */
+  themeTokens: Record<string, string>;
+  /** Color matching tolerance for theme tokens (0-255 RGB space, default: 10) */
+  themeTokenTolerance: number;
+}
 
-/** Text content patterns that indicate placeholder/dynamic values */
-export const DYNAMIC_TEXT_PATTERNS: RegExp[] = [
-  /^\{.+\}$/,              // {value}, {playerName}
-  /^\$[\d.,]+[KMBkmb]?$/,  // $1,234, $1.2K, $10.5M (currency with suffixes)
-  /^[\d,]+$/,              // 1234, 1,000
-  /^\d+:\d+$/,             // 00:00 (timer)
-  /^x[\d.]+$/i,            // x3, X10, x2.0 — multiplier placeholders
-  /^Level \d+$/i,          // Level 5
-  /^Lv\.?\d+$/i,           // Lv.42, Lv5
-  /^Player ?Name$/i,       // PlayerName, Player Name
-  /^0$/,                   // Single zero placeholder
-  /^\d+%$/,                // 50%
-  /^\.\.\./,               // ... (loading placeholder)
-  /→/,                     // Arrow stats like "$1.2K → $1.5K/s"
-  /^\p{Emoji}+$/u,         // Single emoji (e.g. 👑, ⭐) — often dynamic icons
-  /^\?$/,                  // Single "?" — empty socket placeholder
-];
+export const DEFAULT_CONFIG: FigmaForgeConfig = {
+  dynamicPrefix: '$',
+  dynamicNamePatterns: [
+    '^price', '^unit', '^socket', '^stats', '^timer', '^count',
+    '^amount', '^level', '^score', '^currency', '^health',
+    '^progress', '^rank', '^value', '^quantity'
+  ],
+  dynamicTextPatterns: [
+    '^\\{.+\\}$',              // {value}, {playerName}
+    '^\\$[\\d.,]+[KMBkmb]?$',  // $1,234, $1.2K, $10.5M
+    '^[\\d,]+$',               // 1234, 1,000
+    '^\\d+:\\d+$',             // 00:00
+    '^x[\\d.]+$',              // x3, X10
+    '^Level \\d+$',            // Level 5
+    '^Lv\\.?\\d+$',            // Lv.42, Lv5
+    '^Player ?Name$',          // Player Name
+    '^0$',                     // Single zero
+    '^\\d+%$',                 // 50%
+    '^\\.\\.\\.',              // ...
+    '→',                       // Arrow
+    '^\\p{Emoji}+$',           // Single emoji
+    '^\\?$'                    // Single "?"
+  ],
+  interactivePatterns: [
+    'btn', 'button', 'close', 'submit', 'toggle', 'tab_', 'back', '_tab'
+  ],
+  textExportMode: 'all',
+  responsive: false,
+  themeTokens: {},
+  themeTokenTolerance: 10,
+};
+
+export interface RuntimeConfig extends FigmaForgeConfig {
+  _compiledNamePatterns: RegExp[];
+  _compiledTextPatterns: RegExp[];
+  _compiledInteractivePatterns: RegExp[];
+}
+
+export function compileConfig(config: Partial<FigmaForgeConfig>): RuntimeConfig {
+  const merged = { ...DEFAULT_CONFIG, ...config };
+  return {
+    ...merged,
+    _compiledNamePatterns: merged.dynamicNamePatterns.map(p => new RegExp(p, 'i')),
+    // dynamic text requires unicode support for emoji regex
+    _compiledTextPatterns: merged.dynamicTextPatterns.map(p => new RegExp(p, p.includes('Emoji') ? 'iu' : 'i')),
+    _compiledInteractivePatterns: merged.interactivePatterns.map(p => new RegExp(p, 'i')),
+  };
+}
+
+// ─── Dynamic Text Classification ──────────────────────────────────
 
 /** Classify whether a text node contains dynamic (runtime-bound) content.
- *  Rules (priority order):
- *    1. Layer name starts with dynamicPrefix (e.g. "$CashAmount") → DYNAMIC
- *    2. Layer name matches a common game-UI naming pattern → DYNAMIC
- *    3. Text content matches placeholder patterns → DYNAMIC
- *    4. Everything else → DESIGNED (export as PNG)
+ *  Uses the compiled RuntimeConfig patterns.
  */
-export function isDynamicText(node: FigmaForgeNode, dynamicPrefix: string): boolean {
-  if (node.name.startsWith(dynamicPrefix)) return true;
-  if (DYNAMIC_NAME_PATTERNS.some(p => p.test(node.name))) return true;
+export function isDynamicText(node: FigmaForgeNode, config: RuntimeConfig): boolean {
+  if (node.name.startsWith(config.dynamicPrefix)) return true;
+  if (config._compiledNamePatterns.some(p => p.test(node.name))) return true;
   const text = (node.characters ?? '').trim();
   if (!text) return false;
-  return DYNAMIC_TEXT_PATTERNS.some(p => p.test(text));
+  return config._compiledTextPatterns.some(p => p.test(text));
 }
 
 /** Check if any descendant of a node contains dynamic text. */
-export function hasDescendantDynamicText(node: FigmaForgeNode, prefix: string): boolean {
-  if (node.type === 'TEXT' && isDynamicText(node, prefix)) return true;
+export function hasDescendantDynamicText(node: FigmaForgeNode, config: RuntimeConfig): boolean {
+  if (node.type === 'TEXT' && isDynamicText(node, config)) return true;
   if (!node.children) return false;
-  return node.children.some(child => hasDescendantDynamicText(child, prefix));
+  return node.children.some(child => hasDescendantDynamicText(child, config));
+}
+
+/** Check if any descendant is a TEXT node (any text, not just dynamic).
+ *  Used to decide hierarchy preservation — ANY text means "keep children". */
+export function hasDescendantText(node: FigmaForgeNode): boolean {
+  if (node.type === 'TEXT') return true;
+  if (!node.children) return false;
+  return node.children.some(child => hasDescendantText(child));
 }
 
 /**
@@ -190,9 +290,13 @@ export function hasDescendantDynamicText(node: FigmaForgeNode, prefix: string): 
  * Used by extract.ts to embed SSOT patterns into Figma sandbox scripts.
  * Returns a JS function block that can be inserted into template literals.
  */
-export function generateDynamicTextJS(dynamicPrefix: string): string {
-  const nameRegexes = DYNAMIC_NAME_PATTERNS.map(r => r.toString()).join(', ');
-  const textRegexes = DYNAMIC_TEXT_PATTERNS.map(r => r.toString()).join(', ');
+export function generateDynamicTextJS(config: FigmaForgeConfig): string {
+  // We need to convert string patterns back to strings that construct regexes in the Figma sandbox
+  const nameRegexes = config.dynamicNamePatterns.map(p => `/^${p.replace(/^\^/, '')}/i`).join(', ');
+  // Handle unicode flag for emoji pattern
+  const textRegexes = config.dynamicTextPatterns.map(p => {
+    return `/${p.replace(/^\^/, '^')}/${p.includes('Emoji') ? 'iu' : 'i'}`;
+  }).join(', ');
 
   return `
   var _dynNamePats = [${nameRegexes}];
@@ -200,7 +304,7 @@ export function generateDynamicTextJS(dynamicPrefix: string): string {
 
   function isDynText(n) {
     if (n.type !== 'TEXT') return false;
-    if (n.name.startsWith('${dynamicPrefix}')) return true;
+    if (n.name.startsWith('${config.dynamicPrefix}')) return true;
     if (_dynNamePats.some(function(p) { return p.test(n.name); })) return true;
     var text = (n.characters || '').trim();
     if (!text) return false;
@@ -212,6 +316,16 @@ export function generateDynamicTextJS(dynamicPrefix: string): string {
     if ('children' in n && n.children) {
       for (var di = 0; di < n.children.length; di++) {
         if (hasDescDynamic(n.children[di])) return true;
+      }
+    }
+    return false;
+  }
+
+  function hasDescText(n) {
+    if (n.type === 'TEXT') return true;
+    if ('children' in n && n.children) {
+      for (var di = 0; di < n.children.length; di++) {
+        if (hasDescText(n.children[di])) return true;
       }
     }
     return false;

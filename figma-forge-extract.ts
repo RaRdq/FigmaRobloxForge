@@ -12,7 +12,7 @@
  */
 
 import type { FigmaForgeManifest } from './figma-forge-ir';
-import { generateDynamicTextJS } from './figma-forge-shared';
+import { generateDynamicTextJS, FigmaForgeConfig, DEFAULT_CONFIG } from './figma-forge-shared';
 
 /**
  * Builds a self-contained JavaScript string that, when executed in Figma's
@@ -20,15 +20,14 @@ import { generateDynamicTextJS } from './figma-forge-shared';
  * a FigmaForgeManifest JSON object.
  * 
  * @param nodeId - The Figma node ID to start extraction from (e.g. "3:164")
- * @param maxDepth - Maximum recursion depth (default: 10)
  * @param skipPngExport - If true, skip base64 PNG rasterization (tree-only mode).
  *   The rasterQueue is still populated and `unresolvedImages` / `_rasterizedImageHash`
  *   are still set, but `exportedImages` will be empty. Use `buildRasterExportScript()`
  *   in a second pass to export the PNGs in batches.
  */
-export function buildExtractionScript(nodeId: string, maxDepth: number = 10, skipPngExport: boolean = false, dynamicPrefix: string = '$', hideTextMode: 'dynamic' | 'all' | 'none' = 'dynamic'): string {
+export function buildExtractionScript(nodeId: string, maxDepth: number = 10, skipPngExport: boolean = false, config: FigmaForgeConfig = DEFAULT_CONFIG): string {
   // Generate SSOT dynamic text classification functions
-  const dynTextJS = generateDynamicTextJS(dynamicPrefix);
+  const dynTextJS = generateDynamicTextJS(config);
   // This entire string runs inside Figma's plugin context.
   // It uses figma.getNodeByIdAsync() since the file may use dynamic-page access.
   return `
@@ -41,7 +40,7 @@ async function main() {
   const seenImageHashes = new Set();
   const exportedImages = {};
   const rasterQueue = []; // [{irNode, figmaNode}] — nodes needing rasterization
-  const HIDE_TEXT_MODE = '${hideTextMode}';
+  const HIDE_TEXT_MODE = '${config.textExportMode}';
 
   // ── Dynamic Text Classification (SSOT — generated from figma-forge-shared) ──
   ${dynTextJS}
@@ -215,8 +214,7 @@ async function main() {
     return 0;
   }
 
-  function serializeNode(node, depth) {
-    if (depth > ${maxDepth}) return null;
+  function serializeNode(node) {
     stats.totalNodes++;
 
     const ir = {
@@ -230,6 +228,8 @@ async function main() {
       height: 'height' in node ? Math.round(node.height * 100) / 100 : 0,
       rotation: 'rotation' in node ? Math.round(node.rotation * 100) / 100 : 0,
       cornerRadius: getCornerRadius(node),
+      constraints: 'constraints' in node ? node.constraints : undefined,
+      overflowDirection: 'overflowDirection' in node ? node.overflowDirection : 'NONE',
       fills: [],
       strokes: [],
       strokeWeight: 0,
@@ -307,30 +307,47 @@ async function main() {
     // Track frame nodes
     if (node.type === 'FRAME' || node.type === 'COMPONENT' || node.type === 'INSTANCE') stats.frameNodes++;
 
-    // ── Layer Slicing Classification (mirrors assembler classifyNode) ──
-    // Every node is exactly one of: DYNAMIC_TEXT, CONTAINER, PNG
-    //   DYNAMIC_TEXT → TextLabel (game code updates at runtime)
-    //   CONTAINER    → Frame (has dynamic text descendants, preserves hierarchy)
-    //   PNG          → ImageLabel with uploaded rbxassetid://
-
-
+    // ── Layer Slicing Classification ──
+    // Every node is exactly one of: TEXT, CONTAINER, PNG
+    //   TEXT      → TextLabel (ALL text nodes — preserves editability)
+    //   CONTAINER → Frame (any frame with children, preserves hierarchy)
+    //               If it has a visible fill/stroke, also rasterize background (exported with ALL children hidden)
+    //   PNG       → ImageLabel (leaf visuals, [Flatten]-tagged, childless)
 
     var hasChildren = 'children' in node && node.children && node.children.length > 0;
     var nodeName = node.name || '';
     var isFlattenTag = nodeName.includes('[Flatten]') || nodeName.includes('[Raster]') || nodeName.includes('[Flattened]');
 
-    if (isDynText(node)) {
-      // DYNAMIC_TEXT — assembler will emit as TextLabel
+    // Check if node has any visible fill or stroke (background that needs to be captured)
+    const visibleFills = node.fills && Array.isArray(node.fills) ? node.fills.filter(function(f) { return f.visible !== false; }) : [];
+    var hasVisibleFill = visibleFills.length > 0;
+    var hasVisibleStroke = (node.strokes && Array.isArray(node.strokes) && node.strokes.length > 0 && (typeof node.strokeWeight === 'symbol' || node.strokeWeight > 0));
+    var hasVisualBackground = hasVisibleFill || hasVisibleStroke;
+
+    // VERY IMPORTANT: _solidFill optimization natively maps simple frames back to Roblox's BackgroundColor3
+    // Removing this will force simple frames to rasterize as images, breaking script logic!
+    if (visibleFills.length === 1 && visibleFills[0].type === 'SOLID' && !hasVisibleStroke && node.type !== 'TEXT' && !isFlattenTag) {
+      if (!ir._solidFill) ir._solidFill = serializeColor(visibleFills[0].color);
+      ir._solidFillOpacity = visibleFills[0].opacity ?? 1;
+      // Because we can represent this 100% losslessly in Roblox as a Frame, we DO NOT need to rasterize a _BG!
+      hasVisualBackground = false; 
+    }
+
+    if (node.type === 'TEXT') {
+      // ALL text → TextLabel (assembler emits as TextLabel for code binding)
       ir._isDynamic = true;
-    } else if (hasChildren && hasDescDynamic(node)) {
-      // CONTAINER — preserve hierarchy, but export self as background PNG
-      ir._isHybrid = true;
-      if ('exportAsync' in node) {
+    } else if (hasChildren && !isFlattenTag) {
+      // Frame with children → CONTAINER (preserves hierarchy)
+      // Any visible fill/stroke → _isHybrid → _BG ImageLabel from rasterized PNG
+      ir._isHybrid = hasVisualBackground;
+      if (hasVisualBackground && 'exportAsync' in node) {
         rasterQueue.push({ irNode: ir, figmaNode: node });
-        console.log('[FigmaForge] Container+PNG: ' + node.name + ' (' + node.id + ')');
+        console.log('[FigmaForge] Container+BG (will rasterize): ' + node.name + ' (' + node.id + ')');
+      } else {
+        console.log('[FigmaForge] Container (no-bg): ' + node.name + ' (' + node.id + ')');
       }
     } else {
-      // PNG — export entire node as single image
+      // Leaf visual / [Flatten]-tagged → export as single PNG
       ir._isFlattened = true;
       if ('exportAsync' in node) {
         rasterQueue.push({ irNode: ir, figmaNode: node });
@@ -349,7 +366,7 @@ async function main() {
       ir.children = [];
       for (let ci = 0; ci < node.children.length; ci++) {
         const child = node.children[ci];
-        const serialized = serializeNode(child, depth + 1);
+        const serialized = serializeNode(child);
         if (serialized) {
           ir.children.push(serialized);
         }
@@ -395,7 +412,7 @@ async function main() {
     return ir;
   }
 
-  const rootIR = serializeNode(root, 0);
+  const rootIR = serializeNode(root);
 
   // ── Rasterization Loop (HYBRID AWARE) ──
   // Phase 1: Always assign raster hashes and record unresolved images
@@ -412,23 +429,21 @@ async function main() {
       try {
         const hiddenNodes = [];
         if (irNode._isHybrid) {
-          // Hide text descendants so they aren't baked into the background PNG
-          // HIDE_TEXT_MODE: 'dynamic' = only isDynText, 'all' = all TEXT, 'none' = skip
-          async function hideDynamic(n) {
-            if (n.type === 'TEXT') {
-              if (HIDE_TEXT_MODE === 'all' || (HIDE_TEXT_MODE === 'dynamic' && isDynText(n))) {
-                if (n.visible) {
-                  n.visible = false;
-                  hiddenNodes.push(n);
-                }
-              }
-            } else if ('children' in n && n.children) {
-              for (const childNode of n.children) {
-                await hideDynamic(childNode);
+          // Hide ALL children so only the background fill/stroke is baked into the PNG.
+          // Children are preserved in the hierarchy and exported as their own separate PNGs.
+          if ('children' in figmaNode && figmaNode.children) {
+            for (const childNode of figmaNode.children) {
+              if (childNode.visible) {
+                childNode.visible = false;
+                hiddenNodes.push(childNode);
               }
             }
           }
-          await hideDynamic(figmaNode);
+          console.log('[FigmaForge] Hidden ' + hiddenNodes.length + ' children for hybrid: ' + figmaNode.name);
+          // CRITICAL: Figma's render pipeline needs a tick to process visibility changes
+          // before exportAsync captures the frame. Without this, children are still
+          // baked into the exported PNG.
+          await new Promise(function(r) { setTimeout(r, 100); });
         }
 
         const pngBytes = await figmaNode.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
@@ -453,7 +468,7 @@ async function main() {
     version: '1.0.0',
     exportedAt: new Date().toISOString(),
     sourceFile: figma.root.name,
-    sourceNodeId: "${nodeId}",
+    sourceNodeId: root.id,
     sourceNodeName: root.name,
     canvasWidth: root.width || 0,
     canvasHeight: root.height || 0,
@@ -713,15 +728,14 @@ return exportImages();
 export function buildRasterExportScript(
   entries: { nodeId: string; rasterHash: string; isHybrid?: boolean }[],
   scale: number = 2,
-  hideTextMode: 'dynamic' | 'all' | 'none' = 'dynamic',
-  dynamicPrefix: string = '$',
+  config: FigmaForgeConfig,
 ): string {
   if (entries.length === 0) {
     return `return { exportedImages: {}, stats: { total: 0, exported: 0, failed: 0 }, errors: [] };`;
   }
 
   const entriesJson = JSON.stringify(entries);
-  const dynTextJS = generateDynamicTextJS(dynamicPrefix);
+  const dynTextJS = generateDynamicTextJS(config);
 
   return `
 async function exportRasterNodes() {
@@ -730,7 +744,7 @@ async function exportRasterNodes() {
   const errors = [];
   let exported = 0;
   let failed = 0;
-  const HIDE_TEXT_MODE = '${hideTextMode}';
+  const HIDE_TEXT_MODE = '${config.textExportMode}';
 
   // ── Dynamic Text Classification (SSOT — generated from figma-forge-shared) ──
   ${dynTextJS}
@@ -793,10 +807,20 @@ async function exportRasterNodes() {
         continue;
       }
 
-      // Hybrid: hide text before export
+      // Hybrid: hide ALL children (not just text) so only background is captured
       let hidden = [];
       if (entry.isHybrid) {
-        hidden = await hideTextDescendants(node);
+        if ('children' in node && node.children) {
+          for (const c of node.children) {
+            if (c.visible) {
+              c.visible = false;
+              hidden.push(c);
+            }
+          }
+        }
+        console.log('[FigmaForge:Raster] Hidden ' + hidden.length + ' children for hybrid: ' + node.name);
+        // CRITICAL: Figma render pipeline needs a tick to process visibility changes
+        await new Promise(function(r) { setTimeout(r, 100); });
       }
 
       const pngBytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: ${scale} } });

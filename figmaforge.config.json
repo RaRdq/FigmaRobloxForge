@@ -1,0 +1,28 @@
+{
+  "dynamicPrefix": "$",
+  "textExportMode": "all",
+  "dynamicNamePatterns": [
+    "^price", "^unit", "^socket", "^stats", "^timer", "^count",
+    "^amount", "^level", "^score", "^currency", "^health",
+    "^progress", "^rank", "^value", "^quantity"
+  ],
+  "dynamicTextPatterns": [
+    "^\\{.+\\}$",
+    "^\\$[\\d.,]+[KMBkmb]?$",
+    "^[\\d,]+$",
+    "^\\d+:\\d+$",
+    "^x[\\d.]+,$",
+    "^Level \\d+$",
+    "^Lv\\.?\\d+$",
+    "^Player ?Name$",
+    "^0$",
+    "^\\d+%$",
+    "^\\.\\.\\.",
+    "→",
+    "^\\p{Emoji}+$",
+    "^\\?$"
+  ],
+  "interactivePatterns": [
+    "btn", "button", "close", "submit", "toggle", "tab_", "back", "_tab"
+  ]
+}

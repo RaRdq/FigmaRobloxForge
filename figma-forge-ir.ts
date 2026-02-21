@@ -169,6 +169,8 @@ export interface FigmaForgeNode {
   name: string;
   type: FigmaNodeType;
   visible: boolean;
+  /** Figma node description — used for @template, @bind:key, @scroll metadata annotations */
+  description?: string;
 
   // Geometry
   x: number;
@@ -181,6 +183,8 @@ export interface FigmaForgeNode {
   cornerRadius: number | [number, number, number, number];
 
   // Visual
+  _solidFill?: any;
+  _solidFillOpacity?: number;
   fills: FigmaFill[];
   strokes: FigmaStroke[];
   strokeWeight: number;
@@ -196,6 +200,13 @@ export interface FigmaForgeNode {
   /** Text sizing behaviour from Figma (maps to Roblox AutomaticSize) */
   textAutoResize?: 'NONE' | 'WIDTH_AND_HEIGHT' | 'HEIGHT' | 'TRUNCATE';
 
+  // Legacy / Flat Text Properties (Backwards compatibility with old manifest schema)
+  fontFamily?: string;
+  fontWeight?: number;
+  fontSize?: number;
+  textAlignHorizontal?: string;
+  textAlignVertical?: string;
+
   // Auto Layout
   autoLayout?: FigmaAutoLayout;
 
@@ -204,6 +215,15 @@ export interface FigmaForgeNode {
   layoutSizingHorizontal?: 'FIXED' | 'FILL' | 'HUG';
   /** Figma layoutSizingVertical */
   layoutSizingVertical?: 'FIXED' | 'FILL' | 'HUG';
+
+  // Responsive constraints (when NOT in auto-layout)
+  constraints?: {
+    horizontal: 'MIN' | 'CENTER' | 'MAX' | 'STRETCH' | 'SCALE';
+    vertical: 'MIN' | 'CENTER' | 'MAX' | 'STRETCH' | 'SCALE';
+  };
+
+  /** Figma overflow direction (used to auto-detect ScrollingFrames) */
+  overflowDirection?: 'NONE' | 'HORIZONTAL' | 'VERTICAL' | 'BOTH';
 
   // Prototype interactions
   reactions?: FigmaReaction[];
@@ -230,6 +250,14 @@ export interface FigmaForgeNode {
   _smartFlattened?: boolean;
   /** True if this node is a "Hybrid" node (rasterized background, but preserved dynamic children) */
   _isHybrid?: boolean;
+
+  /** First visible GRADIENT fill extracted from container node, used for _BG Frame + UIGradient in assembler.
+   *  Supports GRADIENT_LINEAR and GRADIENT_RADIAL fills. */
+  _gradientFill?: {
+    type: 'GRADIENT_LINEAR' | 'GRADIENT_RADIAL';
+    stops: { position: number; color: { r: number; g: number; b: number; a: number } }[];
+    transform?: [[number, number, number], [number, number, number]];
+  };
 
   /**
    * Render bounds relative to the parent, accounting for effects (drop shadows, blurs).

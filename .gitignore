@@ -31,6 +31,7 @@ HANDOVER.md
 .env
 
 # Pipeline temp artifacts
+exports/
 manifest*.json
 _exported_images*.json
 _imgs_*.json
@@ -38,7 +39,7 @@ _exec_script.txt
 _extract_code.js
 _*.txt
 extraction_*.json
-extraction_script.js
+extraction_script*.js
 render_bounds_check.json
 audit_nodes.json
 final_export.*

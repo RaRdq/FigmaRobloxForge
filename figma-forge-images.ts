@@ -37,7 +37,11 @@ interface ResolveResult {
 // ─── Config Loading ──────────────────────────────────────────────
 
 /**
- * Load Roblox API config with priority:
+ * Load Roblox API config via file-based fallback chain.
+ * NOTE: CLI args (--api-key, --creator-id) take highest priority via setConfig().
+ * This function is only called if CLI args were NOT provided.
+ * 
+ * Fallback priority:
  * 1. Environment variables (ROBLOX_API_KEY, ROBLOX_CREATOR_ID)
  * 2. .env file in FigmaForge directory
  * 3. scripts/roblox-config.json (project root fallback)
@@ -74,8 +78,9 @@ function loadConfig(): { apiKey: string; creatorId: string } {
 
   // Priority 3: scripts/roblox-config.json
   const configPaths = [
+    path.resolve(__dirname, '..', '..', '..', 'scripts', 'roblox-config.json'),
     path.resolve(__dirname, '..', '..', 'scripts', 'roblox-config.json'),
-    path.resolve(__dirname, '..', 'scripts', 'roblox-config.json'),
+    path.resolve(process.cwd(), '..', 'scripts', 'roblox-config.json'),
     path.resolve(process.cwd(), 'scripts', 'roblox-config.json'),
   ];
   for (const configPath of configPaths) {
@@ -100,6 +105,15 @@ function loadConfig(): { apiKey: string; creatorId: string } {
 
 /** Cached config — loaded once per process, not per upload */
 let _cachedConfig: { apiKey: string; creatorId: string } | null = null;
+
+/**
+ * Inject config from CLI params — highest priority, skips all file-based loading.
+ * Call this BEFORE any image uploads if CLI params are provided.
+ */
+export function setConfig(apiKey: string, creatorId: string): void {
+  _cachedConfig = { apiKey, creatorId };
+}
+
 function getConfig(): { apiKey: string; creatorId: string } {
   if (!_cachedConfig) _cachedConfig = loadConfig();
   return _cachedConfig;
@@ -191,10 +205,11 @@ async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise
   const epilogue = Buffer.from(`${CRLF}--${boundary}--${CRLF}`);
   const body = Buffer.concat([preamble, imageBuffer, epilogue]);
 
+
   const resp = await fetch(ASSETS_API_URL, {
     method: 'POST',
     headers: {
-      'x-api-key': config.apiKey,
+      'x-api-key': config.apiKey.trim(),
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
       'Content-Length': String(body.length),
     },
@@ -300,11 +315,8 @@ export async function resolveImages(
     // Get base64 data
     const base64 = exportedImages[imageHash];
     if (!base64) {
-      const msg = `Image hash ${imageHash.slice(0, 12)}... has no exported data — run image export step first`;
-      result.errors.push(msg);
-      if (verbose) console.warn(`[FigmaForge]   ⚠ ${msg}`);
-      result.failed++;
-      continue;
+      // FAIL FAST: Missing image data means the .rbxmx will have missing textures.
+      throw new Error(`[FigmaForge] ❌ FAIL-FAST: Image hash ${imageHash.slice(0, 12)}... has no exported data. Run image export step first!`);
     }
 
     // Decode to buffer (no temp file needed)
@@ -329,13 +341,12 @@ export async function resolveImages(
         await new Promise(r => setTimeout(r, RATE_LIMIT_DELAY_MS));
       }
     } catch (uploadErr: any) {
-      result.failed++;
-      result.errors.push(`Upload failed for ${imageHash.slice(0, 12)}...: ${uploadErr.message}`);
-      if (verbose) console.error(`[FigmaForge]   ❌ ${uploadErr.message}`);
+      // FAIL FAST: Abort the entire pipeline on upload failure to prevent broken RBXMX
+      throw new Error(`[FigmaForge] ❌ FAIL-FAST: Image upload failed for ${imageHash.slice(0, 12)}...: ${uploadErr.message}`);
     }
   }
 
-  // Save cache
+  // Save cache along the way (in case it fails midway, we already updated it in memory, but let's save what we have)
   saveImageCache(cache);
 
   if (verbose) {

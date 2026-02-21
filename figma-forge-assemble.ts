@@ -14,7 +14,8 @@ import type { FigmaForgeNode, FigmaForgeManifest, FigmaColor } from './figma-for
 import {
   round, escapeXmlAttr, getFontFamily,
   mapAutoLayout, mapLayoutSizing, computeCanvasSize,
-  isScrollContainer, isDynamicText, hasDescendantDynamicText,
+  isScrollContainer, isDynamicText, RuntimeConfig,
+  sanitizeTextForRoblox, isTemplateNode, stripConventionSuffix, isScrollConvention,
 } from './figma-forge-shared';
 
 // ─── Constants ───────────────────────────────────────────────────
@@ -26,22 +27,27 @@ let refCounter = 0;
 function nextRef(): string { return `RBX${refCounter++}`; }
 
 // ─── Node Classification ─────────────────────────────────────────
-// isDynamicText and hasDescendantDynamicText are imported from figma-forge-shared (SSOT)
 
 /**
  * Classify a node's export strategy.
  * 
- * - 'png': export as PNG ImageLabel (visual elements, designed text)
- * - 'text_dynamic': emit as TextLabel (runtime-bound values)
- * - 'container': Frame with children (auto-layout preserved)
+ * - 'png': export as PNG ImageLabel (leaf visuals, icons, backgrounds)
+ * - 'text_dynamic': emit as TextLabel (ALL text nodes — preserves editability)
+ * - 'container': Frame with children (hierarchy preserved, auto-layout mapped)
+ * 
+ * Strategy: preserve FULL hierarchy. Every text is a TextLabel, every frame
+ * with children is a container. Only childless leaf visuals become PNG.
  */
 function classifyNode(
   node: FigmaForgeNode,
-  dynamicPrefix: string,
+  config: RuntimeConfig,
 ): 'png' | 'text_dynamic' | 'container' {
-  // Text nodes: classify as dynamic or designed
+  // Handle text nodes based on textExportMode
   if (node.type === 'TEXT') {
-    return isDynamicText(node, dynamicPrefix) ? 'text_dynamic' : 'png';
+    if (config.textExportMode === 'none') return 'png';
+    if (config.textExportMode === 'all') return 'text_dynamic';
+    // 'dynamic' mode: only emit TextLabel if it's dynamic
+    return isDynamicText(node, config) ? 'text_dynamic' : 'png';
   }
 
   // Leaf nodes (no children): always PNG
@@ -49,15 +55,39 @@ function classifyNode(
     return 'png';
   }
 
-  // Containers with children: check if any descendant has dynamic text.
-  // If yes → container (preserve hierarchy so dynamic text is accessible).
-  // If no → PNG (flatten entire subtree into one image).
-  if (hasDescendantDynamicText(node, dynamicPrefix)) {
-    return 'container';
-  }
+  // ANY frame with children → container (preserve hierarchy)
+  return 'container';
+}
 
-  // No dynamic text anywhere inside → export entire subtree as one PNG
-  return 'png';
+
+// ─── Interactive Detection ───────────────────────────────────────
+
+/** Check if a node name indicates an interactive container that needs a TextButton overlay */
+function isInteractive(name: string, config: RuntimeConfig): boolean {
+  return config._compiledInteractivePatterns.some(p => p.test(name));
+}
+
+/** Emit an invisible TextButton overlay for click detection.
+ *  Name: `{parentName}_Interact`, fills parent, transparent, highest ZIndex. */
+function emitInteractiveOverlay(parentName: string, maxChildZIndex: number): string {
+  const ref = nextRef();
+  const name = `${parentName}_Interact`;
+  const z = maxChildZIndex + 10;
+  return [
+    `<Item class="TextButton" referent="${ref}">`,
+    `<Properties>`,
+    `<string name="Name">${escapeXmlAttr(name)}</string>`,
+    `<bool name="Visible">true</bool>`,
+    `<int name="ZIndex">${z}</int>`,
+    `<int name="BorderSizePixel">0</int>`,
+    `<float name="BackgroundTransparency">1</float>`,
+    `<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`,
+    `<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>1</YS><YO>0</YO></UDim2>`,
+    `<string name="Text"></string>`,
+    `<bool name="AutoButtonColor">false</bool>`,
+    `</Properties>`,
+    `</Item>`,
+  ].join('\n');
 }
 
 // ─── XML Helpers ─────────────────────────────────────────────────
@@ -68,24 +98,109 @@ function colorXml(tag: string, c: FigmaColor): string {
 
 // ─── Node Emission ───────────────────────────────────────────────
 
+function emitGeometry(
+  node: FigmaForgeNode,
+  isRoot: boolean,
+  parentHasAutoLayout: boolean,
+  pw: number,
+  ph: number,
+  defaultSizeXOff: number,
+  defaultSizeYOff: number,
+): [string, string, string] {
+  // If in auto-layout, UIListLayout controls position, size uses layoutSizing
+  if (parentHasAutoLayout && !isRoot) {
+    const sxs = node.layoutSizingHorizontal === 'FILL' ? 1 : 0;
+    const sys = node.layoutSizingVertical === 'FILL' ? 1 : 0;
+    const sxo = sxs > 0 ? 0 : defaultSizeXOff;
+    const syo = sys > 0 ? 0 : defaultSizeYOff;
+    return [
+      `<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`,
+      `<UDim2 name="Size"><XS>${sxs}</XS><XO>${sxo}</XO><YS>${sys}</YS><YO>${syo}</YO></UDim2>`,
+      ''
+    ];
+  }
+
+  // Root elements usually centered in ScreenGui
+  if (isRoot) {
+    return [
+      `<UDim2 name="Position"><XS>0.5</XS><XO>0</XO><YS>0.5</YS><YO>0</YO></UDim2>`,
+      `<UDim2 name="Size"><XS>0</XS><XO>${defaultSizeXOff}</XO><YS>0</YS><YO>${defaultSizeYOff}</YO></UDim2>`,
+      `<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`
+    ];
+  }
+
+  // Parse Constraints
+  const hc = node.constraints?.horizontal ?? 'MIN';
+  const vc = node.constraints?.vertical ?? 'MIN';
+  
+  let pxs = 0, pxo = Math.round(node.x), sxs = 0, sxo = defaultSizeXOff, ax = 0;
+  let pys = 0, pyo = Math.round(node.y), sys = 0, syo = defaultSizeYOff, ay = 0;
+
+  // Horizontal Constraints
+  if (hc === 'MAX') {
+    pxs = 1; pxo = Math.round(node.x - pw);
+    sxs = 0; sxo = defaultSizeXOff;
+    ax = 1; // Anchor right
+  } else if (hc === 'CENTER') {
+    pxs = 0.5; pxo = Math.round(node.x + (defaultSizeXOff / 2) - (pw / 2));
+    sxs = 0; sxo = defaultSizeXOff;
+    ax = 0.5; // Anchor center
+  } else if (hc === 'STRETCH') {
+    pxs = 0; pxo = Math.round(node.x);
+    sxs = 1; sxo = Math.round(defaultSizeXOff - pw); // Usually X offset + Width gives total padding
+  } else if (hc === 'SCALE') {
+    pxs = pw > 0 ? node.x / pw : 0; pxo = 0;
+    sxs = pw > 0 ? defaultSizeXOff / pw : 0; sxo = 0;
+  }
+
+  // Vertical Constraints
+  if (vc === 'MAX') {
+    pys = 1; pyo = Math.round(node.y - ph);
+    sys = 0; syo = defaultSizeYOff;
+    ay = 1; // Anchor bottom
+  } else if (vc === 'CENTER') {
+    pys = 0.5; pyo = Math.round(node.y + (defaultSizeYOff / 2) - (ph / 2));
+    sys = 0; syo = defaultSizeYOff;
+    ay = 0.5; // Anchor middle
+  } else if (vc === 'STRETCH') {
+    pys = 0; pyo = Math.round(node.y);
+    sys = 1; syo = Math.round(defaultSizeYOff - ph);
+  } else if (vc === 'SCALE') {
+    pys = ph > 0 ? node.y / ph : 0; pyo = 0;
+    sys = ph > 0 ? defaultSizeYOff / ph : 0; syo = 0;
+  }
+
+  const anchorXml = (ax !== 0 || ay !== 0) 
+    ? `<Vector2 name="AnchorPoint"><X>${ax}</X><Y>${ay}</Y></Vector2>` 
+    : '';
+
+  return [
+    `<UDim2 name="Position"><XS>${pxs}</XS><XO>${pxo}</XO><YS>${pys}</YS><YO>${pyo}</YO></UDim2>`,
+    `<UDim2 name="Size"><XS>${sxs}</XS><XO>${sxo}</XO><YS>${sys}</YS><YO>${syo}</YO></UDim2>`,
+    anchorXml
+  ];
+}
+
 function emitNode(
   node: FigmaForgeNode,
-  dynamicPrefix: string,
+  config: RuntimeConfig,
   zIndex: number = 0,
   isRoot: boolean = false,
   parentHasAutoLayout: boolean = false,
+  parentWidth: number = 0,
+  parentHeight: number = 0,
 ): string {
   if (!node.visible || node._isStrokeDuplicate) return '';
 
-  const strategy = classifyNode(node, dynamicPrefix);
+  const strategy = classifyNode(node, config);
 
   switch (strategy) {
     case 'png':
-      return emitPngNode(node, zIndex, isRoot, parentHasAutoLayout);
+      return emitPngNode(node, zIndex, isRoot, parentHasAutoLayout, parentWidth, parentHeight);
     case 'text_dynamic':
-      return emitDynamicTextNode(node, dynamicPrefix, zIndex, parentHasAutoLayout);
+      return emitDynamicTextNode(node, config, zIndex, parentHasAutoLayout, parentWidth, parentHeight);
     case 'container':
-      return emitContainerNode(node, dynamicPrefix, zIndex, isRoot, parentHasAutoLayout);
+      return emitContainerNode(node, config, zIndex, isRoot, parentHasAutoLayout, parentWidth, parentHeight);
   }
 }
 
@@ -98,35 +213,27 @@ function emitPngNode(
   zIndex: number,
   isRoot: boolean,
   parentHasAutoLayout: boolean = false,
+  parentWidth: number = 0,
+  parentHeight: number = 0,
 ): string {
   const ref = nextRef();
-  const sizing = mapLayoutSizing(node.layoutSizingHorizontal, node.layoutSizingVertical);
-  const sxs = sizing.sizeXScale;
-  const sys = sizing.sizeYScale;
-
-  // Use render bounds if available (includes drop shadow / blur padding)
   const rb = node._renderBounds;
   const effectiveW = rb ? rb.width : node.width;
   const effectiveH = rb ? rb.height : node.height;
-  const effectiveX = rb ? rb.x : node.x;
-  const effectiveY = rb ? rb.y : node.y;
-
-  const sxo = sxs > 0 ? 0 : Math.round(effectiveW);
-  const syo = sys > 0 ? 0 : Math.round(effectiveH);
 
   // Determine the image asset ID
   const assetId = node._resolvedImageId || '';
   const hasImage = !!assetId;
 
-  // Position: root → screen center, auto-layout child → skip (UIListLayout manages), else → parent-relative
-  let posXml: string;
-  if (isRoot) {
-    posXml = `<UDim2 name="Position"><XS>0.5</XS><XO>0</XO><YS>0.5</YS><YO>0</YO></UDim2>`;
-  } else if (parentHasAutoLayout) {
-    posXml = `<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`;
-  } else {
-    posXml = `<UDim2 name="Position"><XS>0</XS><XO>${Math.round(effectiveX)}</XO><YS>0</YS><YO>${Math.round(effectiveY)}</YO></UDim2>`;
-  }
+  const [posXml, sizeXml, anchorXml] = emitGeometry(node, isRoot, parentHasAutoLayout, parentWidth, parentHeight, Math.round(effectiveW), Math.round(effectiveH));
+
+  // Always use ImageLabel — it supports both Image AND BackgroundColor3.
+  // Frame does NOT support Image/ScaleType, so solid-fill nodes must also be ImageLabel.
+  // When node has BOTH solidFill AND a resolved image, the image IS the visual —
+  // the solid fill is just Figma's underlying paint layer, so make bg transparent.
+  const isSolidFrame = !!node._solidFill;
+  const solidFillOnlyNoImage = isSolidFrame && !hasImage;
+  const bgTransparency = solidFillOnlyNoImage ? (1 - (node._solidFillOpacity ?? 1)) : 1;
 
   const lines: string[] = [
     `<Item class="ImageLabel" referent="${ref}">`,
@@ -135,22 +242,33 @@ function emitPngNode(
     `<bool name="Visible">true</bool>`,
     `<int name="ZIndex">${zIndex}</int>`,
     `<int name="BorderSizePixel">0</int>`,
-    `<float name="BackgroundTransparency">1</float>`,
+    `<float name="BackgroundTransparency">${bgTransparency}</float>`,
     posXml,
-    `<UDim2 name="Size"><XS>${sxs}</XS><XO>${sxo}</XO><YS>${sys}</YS><YO>${syo}</YO></UDim2>`,
+    sizeXml,
   ];
 
-  if (isRoot) {
-    lines.push(`<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`);
+  if (anchorXml) lines.push(anchorXml);
+
+  // Only set BackgroundColor3 when there's a solid fill and NO image
+  if (solidFillOnlyNoImage) {
+    lines.push(colorXml('BackgroundColor3', node._solidFill));
   }
 
+  const sizing = mapLayoutSizing(node.layoutSizingHorizontal, node.layoutSizingVertical);
   if (sizing.autoSizeToken > 0) {
-    lines.push(`<token name="AutomaticSize">${sizing.autoSizeToken}</token>`);
+    lines.push(`<int name="AutomaticSize">${sizing.autoSizeToken}</int>`);
   }
 
   if (hasImage) {
     lines.push(`<Content name="Image"><url>${assetId}</url></Content>`);
-    lines.push(`<token name="ScaleType">0</token>`); // Stretch — pixel-exact PNG
+    // 9-slice if metadata present, else Stretch (pixel-exact PNG)
+    const slice = (node as any)._sliceCenter;
+    if (slice) {
+      lines.push(`<token name="ScaleType">1</token>`); // Slice
+      lines.push(`<Rect name="SliceCenter"><Min><X>${slice.left}</X><Y>${slice.top}</Y></Min><Max><X>${slice.right}</X><Y>${slice.bottom}</Y></Max></Rect>`);
+    } else {
+      lines.push(`<token name="ScaleType">0</token>`); // Stretch
+    }
   }
 
   if (isRoot) {
@@ -173,28 +291,42 @@ function emitPngNode(
  */
 function emitDynamicTextNode(
   node: FigmaForgeNode,
-  dynamicPrefix: string,
+  config: RuntimeConfig,
   zIndex: number,
   parentHasAutoLayout: boolean = false,
+  parentWidth: number = 0,
+  parentHeight: number = 0,
 ): string {
   const ref = nextRef();
   const ts = node.textStyle;
-  const name = node.name.startsWith(dynamicPrefix)
+  // Only add $ prefix for text nodes that match dynamic patterns (runtime-bound values).
+  // Non-dynamic text (labels, designed text) keeps its original Figma name.
+  const name = node.name.startsWith(config.dynamicPrefix)
     ? node.name
-    : `${dynamicPrefix}${node.name}`;
+    : isDynamicText(node, config)
+      ? `${config.dynamicPrefix}${node.name}`
+      : node.name;
 
-  const fontFamily = getFontFamily(ts?.fontFamily ?? 'Inter');
-  const fontWeight = Math.round((ts?.fontWeight ?? 400) / 100) * 100;
+  const fontFamily = getFontFamily(ts?.fontFamily ?? node.fontFamily ?? 'Inter');
+  const rawWeight = Number(ts?.fontWeight ?? node.fontWeight ?? 400);
+  const fontWeight = Number.isFinite(rawWeight) ? Math.round(rawWeight / 100) * 100 : 400;
   const textColor = node.fills?.find(f => f.visible && f.type === 'SOLID')?.color
     ?? { r: 1, g: 1, b: 1, a: 1 };
 
   const hAlignMap: Record<string, number> = { LEFT: 0, RIGHT: 1, CENTER: 2, JUSTIFIED: 0 };
   const vAlignMap: Record<string, number> = { TOP: 0, CENTER: 1, BOTTOM: 2 };
 
-  // Position: auto-layout child → skip (UIListLayout manages), else → parent-relative
-  const posXml = parentHasAutoLayout
-    ? `<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`
-    : `<UDim2 name="Position"><XS>0</XS><XO>${Math.round(node.x)}</XO><YS>0</YS><YO>${Math.round(node.y)}</YO></UDim2>`;
+  // ── GENERIC FIX: Dynamic text ($prefix) uses parent-relative width + AutomaticSize ──
+  // Figma text bounds are snapped to static content — at runtime the text changes,
+  // so we use parent-fill width and let Roblox auto-size the height.
+  const isDynamic = name.startsWith(config.dynamicPrefix);
+
+  const [posXml, baseSizeXml, anchorXml] = emitGeometry(node, false, parentHasAutoLayout, parentWidth, parentHeight, Math.round(node.width), Math.round(node.height));
+  
+  // Size override: dynamic text inside auto-layout forces Scale X = 1
+  const sizeXml = (isDynamic && parentHasAutoLayout)
+    ? `<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>0</YS><YO>${Math.round(node.height)}</YO></UDim2>`
+    : baseSizeXml;
 
   const lines: string[] = [
     `<Item class="TextLabel" referent="${ref}">`,
@@ -205,15 +337,22 @@ function emitDynamicTextNode(
     `<int name="BorderSizePixel">0</int>`,
     `<float name="BackgroundTransparency">1</float>`,
     posXml,
-    `<UDim2 name="Size"><XS>0</XS><XO>${Math.round(node.width)}</XO><YS>0</YS><YO>${Math.round(node.height)}</YO></UDim2>`,
-    `<string name="Text">${escapeXmlAttr(node.characters ?? '')}</string>`,
-    `<float name="TextSize">${ts?.fontSize ?? 14}</float>`,
+    sizeXml,
+    `<string name="Text">${escapeXmlAttr(sanitizeTextForRoblox(node.characters ?? ''))}</string>`,
+    `<float name="TextSize">${ts?.fontSize ?? node.fontSize ?? 14}</float>`,
     colorXml('TextColor3', textColor),
     `<Font name="FontFace"><Family><url>${fontFamily}</url></Family><Weight>${fontWeight}</Weight><Style>Normal</Style></Font>`,
-    `<token name="TextXAlignment">${hAlignMap[ts?.textAlignHorizontal ?? 'LEFT'] ?? 0}</token>`,
-    `<token name="TextYAlignment">${vAlignMap[ts?.textAlignVertical ?? 'TOP'] ?? 0}</token>`,
-    `<bool name="TextWrapped">false</bool>`,
+    `<token name="TextXAlignment">${hAlignMap[ts?.textAlignHorizontal ?? node.textAlignHorizontal ?? 'LEFT'] ?? 0}</token>`,
+    `<token name="TextYAlignment">${vAlignMap[ts?.textAlignVertical ?? node.textAlignVertical ?? 'TOP'] ?? 0}</token>`,
+    `<bool name="TextWrapped">${isDynamic ? 'true' : 'false'}</bool>`,
   ];
+
+  if (anchorXml) lines.push(anchorXml);
+
+  // Dynamic text gets AutomaticSize=2 (Y) so the label grows vertically if text wraps
+  if (isDynamic) {
+    lines.push(`<int name="AutomaticSize">2</int>`);
+  }
 
   // Text transparency from node opacity
   if (node.opacity < 1) {
@@ -260,29 +399,29 @@ function emitDynamicTextNode(
  */
 function emitContainerNode(
   node: FigmaForgeNode,
-  dynamicPrefix: string,
+  config: RuntimeConfig,
   zIndex: number,
   isRoot: boolean,
   parentHasAutoLayout: boolean = false,
+  parentWidth: number = 0,
+  parentHeight: number = 0,
 ): string {
   const ref = nextRef();
   const isScroll = isScrollContainer(node);
   const className = isScroll ? 'ScrollingFrame' : 'Frame';
   const sizing = mapLayoutSizing(node.layoutSizingHorizontal, node.layoutSizingVertical);
-  const sxs = sizing.sizeXScale;
-  const sys = sizing.sizeYScale;
-  const sxo = sxs > 0 ? 0 : Math.round(node.width);
-  const syo = sys > 0 ? 0 : Math.round(node.height);
 
-  // Position: root → screen center, auto-layout child → skip, else → parent-relative
-  let posXml: string;
-  if (isRoot) {
-    posXml = `<UDim2 name="Position"><XS>0.5</XS><XO>0</XO><YS>0.5</YS><YO>0</YO></UDim2>`;
-  } else if (parentHasAutoLayout) {
-    posXml = `<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`;
-  } else {
-    posXml = `<UDim2 name="Position"><XS>0</XS><XO>${Math.round(node.x)}</XO><YS>0</YS><YO>${Math.round(node.y)}</YO></UDim2>`;
-  }
+  // ── Render bounds fix
+  const rb = (node as any)._renderBounds as { x: number; y: number; width: number; height: number } | undefined;
+  const hasRenderBounds = !!(rb && (node as any)._isHybrid);
+  const effectiveWidth = hasRenderBounds ? rb!.width : node.width;
+  const effectiveHeight = hasRenderBounds ? rb!.height : node.height;
+  
+  const [posXml, sizeXml, anchorXml] = emitGeometry(node, isRoot, parentHasAutoLayout, parentWidth, parentHeight, Math.round(effectiveWidth), Math.round(effectiveHeight));
+
+  const hasBgUnderlay = !isRoot && !!((node as any)._isHybrid && (node as any)._resolvedImageId);
+  const solidFill = !isRoot ? (node as any)._solidFill as FigmaColor | undefined : undefined;
+  const bgTransparency = solidFill ? 0 : 1;
 
   const lines: string[] = [
     `<Item class="${className}" referent="${ref}">`,
@@ -291,23 +430,36 @@ function emitContainerNode(
     `<bool name="Visible">true</bool>`,
     `<int name="ZIndex">${zIndex}</int>`,
     `<int name="BorderSizePixel">0</int>`,
-    `<float name="BackgroundTransparency">1</float>`,
+    `<float name="BackgroundTransparency">${bgTransparency}</float>`,
     posXml,
-    `<UDim2 name="Size"><XS>${sxs}</XS><XO>${sxo}</XO><YS>${sys}</YS><YO>${syo}</YO></UDim2>`,
+    sizeXml,
   ];
 
-  if (isRoot) {
+  if (anchorXml) lines.push(anchorXml);
+
+  // Solid fill → set BackgroundColor3 directly on Frame (no ImageLabel needed)
+  if (solidFill) {
+    lines.push(colorXml('BackgroundColor3', solidFill));
+  }
+
+  if (isRoot && !anchorXml) {
+    // Only push if anchorXml did not handle it
     lines.push(`<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`);
+  }
+  if (isRoot) {
     // Respect Figma's clipsContent — some modals intentionally overflow (e.g. close button, title bar)
     lines.push(`<bool name="ClipsDescendants">${!!node.clipsContent}</bool>`);
   }
 
   if (sizing.autoSizeToken > 0) {
-    lines.push(`<token name="AutomaticSize">${sizing.autoSizeToken}</token>`);
+    lines.push(`<int name="AutomaticSize">${sizing.autoSizeToken}</int>`);
   }
 
   if (node.clipsContent && !isScroll && !isRoot) {
-    lines.push(`<bool name="ClipsDescendants">true</bool>`);
+    // Hybrid containers with render bounds have been expanded to fit effects (shadows, blurs).
+    // Enabling ClipsDescendants would clip those effects, defeating the purpose.
+    const shouldClip = hasRenderBounds ? false : true;
+    lines.push(`<bool name="ClipsDescendants">${shouldClip}</bool>`);
   }
 
   if (isRoot) {
@@ -318,14 +470,73 @@ function emitContainerNode(
   if (isScroll) {
     const canvasSize = computeCanvasSize(node);
     lines.push(`<Vector2 name="CanvasSize"><X>${Math.round(canvasSize.width)}</X><Y>${Math.round(canvasSize.height)}</Y></Vector2>`);
-    lines.push(`<token name="ScrollBarThickness">${DEFAULT_SCROLLBAR_THICKNESS}</token>`);
+    lines.push(`<int name="ScrollBarThickness">${DEFAULT_SCROLLBAR_THICKNESS}</int>`);
     lines.push(`<bool name="ScrollingEnabled">true</bool>`);
   }
 
   lines.push(`</Properties>`);
 
+  // ── UICorner for rounded containers ──
+  const cr = typeof node.cornerRadius === 'number' ? node.cornerRadius
+    : (Array.isArray(node.cornerRadius) ? node.cornerRadius[0] : 0);
+  if (cr > 0) {
+    const crRef = nextRef();
+    const isCircle = cr >= Math.min(node.width, node.height) / 2;
+    lines.push(`<Item class="UICorner" referent="${crRef}"><Properties>`);
+    if (isCircle) {
+      lines.push(`<UDim name="CornerRadius"><S>0.5</S><O>0</O></UDim>`);
+    } else {
+      lines.push(`<UDim name="CornerRadius"><S>0</S><O>${Math.round(cr)}</O></UDim>`);
+    }
+    lines.push(`</Properties></Item>`);
+  }
+
+  // ── Background underlay: rasterized PNG as ImageLabel _BG ──────────────────
+  // Per SOW_UI_AAA.md §2.2: hybrid containers with non-trivial backgrounds (gradients,
+  // image fills, complex effects) emit ImageLabel "_BG" at ZIndex=1 from a rasterized PNG.
+  // Pure solid fills are handled above via BackgroundColor3 on the Frame — no PNG needed.
+  // _isHybrid is ONLY true for non-solid backgrounds (set in extract.ts).
+  if ((node as any)._isHybrid && (node as any)._resolvedImageId) {
+    const bgRef = nextRef();
+    const bgAsset = (node as any)._resolvedImageId as string;
+    lines.push(`<Item class="ImageLabel" referent="${bgRef}">`);
+    lines.push(`<Properties>`);
+    lines.push(`<string name="Name">_BG</string>`);
+    lines.push(`<bool name="Visible">true</bool>`);
+    lines.push(`<int name="ZIndex">0</int>`);  // ZIndex=0: behind all children (children start at 2+)
+    lines.push(`<int name="BorderSizePixel">0</int>`);
+    lines.push(`<float name="BackgroundTransparency">1</float>`);
+    lines.push(`<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`);
+    lines.push(`<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>1</YS><YO>0</YO></UDim2>`);
+    lines.push(`<Content name="Image"><url>${bgAsset}</url></Content>`);
+    lines.push(`<token name="ScaleType">0</token>`);
+    lines.push(`</Properties>`);
+    lines.push(`</Item>`);
+  }
+
+
   // ── Auto-layout children (UIListLayout + UIPadding) ──
   const al = mapAutoLayout(node);
+  const useContentWrapper = !!al;
+
+  if (useContentWrapper) {
+    const cRef = nextRef();
+    lines.push(`<Item class="Frame" referent="${cRef}"><Properties>`);
+    lines.push(`<string name="Name">Content</string>`);
+    lines.push(`<bool name="Visible">true</bool>`);
+    lines.push(`<int name="ZIndex">${hasBgUnderlay ? 2 : 1}</int>`);
+    lines.push(`<int name="BorderSizePixel">0</int>`);
+    lines.push(`<float name="BackgroundTransparency">1</float>`);
+    lines.push(`<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`);
+    if (isScroll) {
+      const canvasSize = computeCanvasSize(node);
+      lines.push(`<UDim2 name="Size"><XS>0</XS><XO>${Math.round(canvasSize.width)}</XO><YS>0</YS><YO>${Math.round(canvasSize.height)}</YO></UDim2>`);
+    } else {
+      lines.push(`<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>1</YS><YO>0</YO></UDim2>`);
+    }
+    lines.push(`</Properties>`);
+  }
+
   if (al) {
     const llRef = nextRef();
     lines.push(`<Item class="UIListLayout" referent="${llRef}"><Properties>`);
@@ -351,11 +562,44 @@ function emitContainerNode(
   }
 
   // ── Emit children ──
-  const thisHasAutoLayout = !!(node.autoLayout && node.autoLayout.mode && node.autoLayout.mode !== 'NONE');
+  const thisHasAutoLayout = !!al;
+  // If wrapped in Content, Content frame provides Z-isolation, so children start at 1.
+  // Otherwise, children must render above the _BG underlay.
+  const childZBase = useContentWrapper ? 1 : (hasBgUnderlay ? 2 : 1);
+  let maxChildZ = 0;
   if (node.children) {
     node.children.forEach((child, i) => {
-      lines.push(emitNode(child, dynamicPrefix, i + 1, false, thisHasAutoLayout));
+      const childZ = childZBase + i;
+      if (childZ > maxChildZ) maxChildZ = childZ;
+
+      if (!thisHasAutoLayout && !isRoot) {
+        const cx = Math.round(child.x);
+        const cy = Math.round(child.y);
+        const cw = Math.round(child.width);
+        const ch = Math.round(child.height);
+        const pw = Math.round(effectiveWidth);
+        const ph = Math.round(effectiveHeight);
+        if (cx < 0 || cy < 0) {
+          // Negative positions now safely preserved by UDim2 translation and Content wrapping
+        }
+        if (cx + cw > pw + 5 || cy + ch > ph + 5) {
+          console.warn(`[FigmaForge] ⚠️  Child "${child.name}" (${cw}×${ch} at ${cx},${cy}) exceeds parent "${node.name}" bounds (${pw}×${ph})`);
+        }
+      }
+
+      lines.push(emitNode(child, config, childZ, false, thisHasAutoLayout, effectiveWidth, effectiveHeight));
     });
+  }
+
+  if (useContentWrapper) {
+    lines.push(`</Item>`); // Close the Content frame
+  }
+
+  // ── Auto-inject TextButton overlay for interactive containers ──
+  if (isInteractive(node.name, config) && !isRoot) {
+    // Inject at a high ZIndex on the main frame so it covers Content and _BG
+    const interactZ = useContentWrapper ? 10 : maxChildZ + 1;
+    lines.push(emitInteractiveOverlay(node.name, interactZ));
   }
 
   lines.push(`</Item>`);
@@ -374,24 +618,27 @@ function emitContainerNode(
  * - Containers → Frame + UIListLayout (auto-layout preserved)
  * 
  * @param manifest - The FigmaForge IR manifest
- * @param dynamicPrefix - Prefix for identifying dynamic text nodes (default: '$')
+ * @param config - The runtime config for text extraction and defaults
  * @returns Complete .rbxmx XML string
  */
 export function assembleRbxmx(
   manifest: FigmaForgeManifest,
-  dynamicPrefix: string = '$',
+  config: RuntimeConfig,
 ): string {
   refCounter = 0;
-  const body = emitNode(manifest.root, dynamicPrefix, 1, true);
+  const body = emitNode(manifest.root, config, 1, true);
   const screenGuiRef = nextRef();
   const screenGuiName = manifest.root.name || 'FigmaForgeUI';
 
+  // ScreenGui: Enabled=true (Lua controls visibility via rootFrame.Visible),
+  // IgnoreGuiInset=true (proper centering), DisplayOrder=50 (above HUD)
   const screenGui = `<Item class="ScreenGui" referent="${screenGuiRef}"><Properties>` +
     `<string name="Name">${escapeXmlAttr(screenGuiName)}</string>` +
     `<bool name="IgnoreGuiInset">true</bool>` +
     `<bool name="ResetOnSpawn">false</bool>` +
     `<token name="ZIndexBehavior">1</token>` +
     `<bool name="Enabled">true</bool>` +
+    `<int name="DisplayOrder">50</int>` +
     `</Properties>${body}</Item>`;
 
   return `<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">${screenGui}</roblox>`;

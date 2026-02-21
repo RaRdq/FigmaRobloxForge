@@ -1,0 +1,32 @@
+{
+  "root": "DailyRewardModal",
+  "closeButtons": [
+    "CloseBtn"
+  ],
+  "textBindings": {},
+  "templates": {},
+  "tabGroups": {},
+  "interactiveNodes": [
+    "ClaimButton",
+    "CloseBtn"
+  ],
+  "containers": [
+    "DailyRewardModal",
+    "TitleBar",
+    "Day1_Card",
+    "Day2_Card",
+    "Day3_Card",
+    "Day4_Card",
+    "Day5_Card",
+    "Day6_Card",
+    "Day7_Card",
+    "ClaimButton",
+    "CloseBtn"
+  ],
+  "scrollContainers": [],
+  "meta": {
+    "generatedAt": "2026-02-21T20:44:39.870Z",
+    "figmaForgeVersion": "2.0.0",
+    "nodeCount": 68
+  }
+}

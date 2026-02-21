@@ -16,7 +16,7 @@
  */
 
 import type { FigmaForgeNode } from './figma-forge-ir';
-import { isDynamicText, hasDescendantDynamicText } from './figma-forge-shared';
+import { isDynamicText, hasDescendantDynamicText, RuntimeConfig } from './figma-forge-shared';
 
 // ─── Constants ───────────────────────────────────────────────────
 
@@ -45,28 +45,28 @@ export interface ExportableNode {
  * - Subtrees with no dynamic text descendants (flatten to one PNG)
  * 
  * @param root - IR root node
- * @param dynamicPrefix - Prefix for dynamic text nodes (default: '$')
+ * @param config - Runtime config
  * @returns Array of nodes to export as PNGs
  */
 export function collectExportableNodes(
   root: FigmaForgeNode,
-  dynamicPrefix: string = '$',
+  config: RuntimeConfig,
 ): ExportableNode[] {
   const results: ExportableNode[] = [];
-  walkForExport(root, dynamicPrefix, results);
+  walkForExport(root, config, results);
   return results;
 }
 
 function walkForExport(
   node: FigmaForgeNode,
-  dynamicPrefix: string,
+  config: RuntimeConfig,
   results: ExportableNode[],
 ): void {
   if (!node.visible || node._isStrokeDuplicate) return;
 
   // Text nodes: designed text → export as PNG
   if (node.type === 'TEXT') {
-    if (!isDynamicText(node, dynamicPrefix)) {
+    if (!isDynamicText(node, config)) {
       results.push({
         nodeId: node.id,
         name: node.name,
@@ -91,10 +91,10 @@ function walkForExport(
   }
 
   // Container: check if any descendant has dynamic text
-  if (hasDescendantDynamicText(node, dynamicPrefix)) {
+  if (hasDescendantDynamicText(node, config)) {
     // Has dynamic text inside — recurse into children
     for (const child of node.children) {
-      walkForExport(child, dynamicPrefix, results);
+      walkForExport(child, config, results);
     }
   } else {
     // No dynamic text — export entire subtree as one PNG

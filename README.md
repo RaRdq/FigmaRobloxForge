@@ -64,11 +64,13 @@ npx tsc --outDir dist
 ### Usage
 
 ```bash
-# Generate .rbxmx with image uploads
+# Generate .rbxmx with image uploads (pass credentials directly)
 npx ts-node figma-forge-cli.ts \
   --input manifest.json \
   --output ../../src/StarterGui/MyFrame.rbxmx \
   --resolve-images \
+  --api-key YOUR_ROBLOX_API_KEY \
+  --creator-id YOUR_ROBLOX_CREATOR_ID \
   --verbose
 ```
 
@@ -78,7 +80,11 @@ npx ts-node figma-forge-cli.ts \
 Options:
   --input, -i        Path to FigmaForge manifest JSON
   --output, -o       Path for generated .rbxmx file
+  --config, -c       Path to custom figmaforge.config.json
+  --text-export      Text export mode: 'all' (default), 'dynamic', 'none'
   --resolve-images   Upload rasterized PNGs to Roblox (requires API key)
+  --api-key          Roblox Open Cloud API key (highest priority)
+  --creator-id       Roblox creator/user ID for asset ownership
   --verbose, -v      Show detailed processing info
   --help, -h         Show help
 ```
@@ -91,12 +97,39 @@ When extraction identifies PNG nodes, they're rasterized via `exportAsync` at 2�
 
 Config priority for Roblox API credentials:
 
-1. **`scripts/roblox-config.json`** (recommended) — `{ "apiKey": "...", "creatorId": "..." }`
-2. **`.env` file** in FigmaForge directory
-3. **Environment variables:** `ROBLOX_API_KEY` + `ROBLOX_CREATOR_ID`
+1. **CLI arguments** (recommended) — `--api-key YOUR_KEY --creator-id YOUR_ID`
+2. **Environment variables:** `ROBLOX_API_KEY` + `ROBLOX_CREATOR_ID`
+3. **`.env` file** in FigmaForge directory
+4. **`scripts/roblox-config.json`** — project-level fallback
 
 > [!WARNING]
 > **Always clear stale env vars** before running CLI: `$Env:ROBLOX_API_KEY=$null; $Env:ROBLOX_CREATOR_ID=$null`
+
+### Custom Configuration (`figmaforge.config.json`)
+
+FigmaForge is genre-agnostic. You can override the default text and button detection heuristics by providing a `figmaforge.config.json` file in your working directory, or pointing to one with `--config`.
+
+```json
+{
+  "dynamicPrefix": "$",
+  "textExportMode": "all",
+  "dynamicNamePatterns": [
+    "^price", "^level", "^score", "^amount"
+  ],
+  "dynamicTextPatterns": [
+    "^\\\\{[^}]+\\\\}$",
+    "^[\\\\d,]+$"
+  ],
+  "interactivePatterns": [
+    "btn", "button", "tab_"
+  ]
+}
+```
+
+- **`textExportMode`**: Controls how text is emitted.
+  - `"all"` (default): Every text node becomes a Roblox `TextLabel`.
+  - `"dynamic"`: Only text nodes matching the dynamic patterns become `TextLabel`s. All other text is baked into the rasterized PNG background.
+  - `"none"`: All text is baked into the background PNG.
 
 ### Caching
 
@@ -127,11 +160,11 @@ The assembler (`figma-forge-assemble.ts` → `classifyNode`) determines how each
 
 | Criterion | Classification | Output |
 |---|---|---|
-| Text with `$` prefix or dynamic pattern | `text_dynamic` | `TextLabel` |
+| Text matching config rules / export mode | `text_dynamic` | `TextLabel` |
 | Has children with dynamic text descendants | `container` | `Frame` (with background ImageLabel if hybrid) |
 | Everything else (leaf, no dynamic children) | `png` | `ImageLabel` |
 
-Dynamic text patterns include: `$Price`, `$Level`, `$SocketIcon_N`, names matching `/^(price|level|score|timer|count|amount|value|quantity|health|progress|rank|unit|socket|stats)/i`, and placeholder content like numbers-only, `x2.0`, `?`, etc.
+Dynamic text patterns are customizable via `figmaforge.config.json`. By default, they include: `$Price`, `$Level`, `$SocketIcon_N`, names matching `/^(price|level|score|timer|count|amount|value|quantity|health|progress|rank|unit|socket|stats)/i`, and placeholder content like numbers-only, `x2.0`, `?`, etc.
 
 ## ⚠️ Known Limitations
 
