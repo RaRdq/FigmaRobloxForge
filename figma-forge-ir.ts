@@ -250,6 +250,8 @@ export interface FigmaForgeNode {
   _smartFlattened?: boolean;
   /** True if this node is a "Hybrid" node (rasterized background, but preserved dynamic children) */
   _isHybrid?: boolean;
+  /** True if this TEXT node matched an isDynamicText() pattern — assembler uses this for $ prefix */
+  _isDynamicPattern?: boolean;
 
   /** First visible GRADIENT fill extracted from container node, used for _BG Frame + UIGradient in assembler.
    *  Supports GRADIENT_LINEAR and GRADIENT_RADIAL fills. */

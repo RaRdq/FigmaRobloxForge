@@ -1,15 +1,6 @@
 # Dependencies
 node_modules/
 
-# Generated test/e2e output files
-e2e-*.luau
-e2e-*.json
-test-output.*
-test-manifest.json
-
-# Temporary scripts
-run-e2e-*.ts
-
 # Build output
 dist/
 *.js
@@ -17,39 +8,73 @@ dist/
 *.d.ts
 !figma-forge-ir.ts
 
+# Environment
+.env
+
 # IDE
 .vscode/
 *.swp
 *.swo
 
-# Local-only docs
-HANDOVER.md
-
-# Image pipeline
+# Image pipeline cache
 .figmaforge-image-cache.json
 .figmaforge-tmp/
-.env
 
-# Pipeline temp artifacts
+# Pipeline temp artifacts (game-specific)
 exports/
+output/
 manifest*.json
 _exported_images*.json
 _imgs_*.json
 _exec_script.txt
 _extract_code.js
 _*.txt
+extraction_*.js
 extraction_*.json
-extraction_script*.js
 render_bounds_check.json
 audit_nodes.json
 final_export.*
-output/
+export_chunk_*.js
+export_script_*.js
+exported_images_*.json
+exported-images.json
+temp-*.js
+temp_*.js
+img_script.js
+execute_mcp.js
 *.rbxmx
 upgrade-modal-*.json
+*.bindings.json
+output.json
+payload.json
+captured.txt
+encoded.txt
+cors_server.py
+patch_*.js
+pull_hashes.js
+run_extraction_ws.js
+get-script.ts
+
+# Game-specific temp dirs
+temp/
+images/
+docs/
+LegEggTemp/
+
+# Generated test/e2e
+e2e-*.luau
+e2e-*.json
+test-output.*
+test-manifest.json
+run-e2e-*.ts
 
 # Dead files
 generate_script.ts
+HANDOVER.md
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Lock files (generated)
+package-lock.json

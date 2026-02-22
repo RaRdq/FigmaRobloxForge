@@ -1,6 +1,6 @@
 {
   "dynamicPrefix": "$",
-  "textExportMode": "all",
+  "textExportMode": "dynamic",
   "dynamicNamePatterns": [
     "^price", "^unit", "^socket", "^stats", "^timer", "^count",
     "^amount", "^level", "^score", "^currency", "^health",

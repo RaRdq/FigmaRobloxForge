@@ -260,14 +260,17 @@ async function main() {
       ir.effects = Array.from(node.effects).map(serializeEffect);
     }
 
-    // ── Render Bounds (accounts for drop shadows, blurs, etc.) ──
+    // ── Render Bounds (accounts for drop shadows, blurs, strokes, and text metrics) ──
     // exportAsync captures the visual render including effects, so the PNG
     // may be larger than node.width/height. We compute the delta so the
     // assembler can size the ImageLabel to match the actual PNG dimensions.
     var hasVisibleEffects = ir.effects && ir.effects.some(function(e) {
       return e.visible && (e.type === 'DROP_SHADOW' || e.type === 'INNER_SHADOW' || e.type === 'LAYER_BLUR');
     });
-    if (hasVisibleEffects && 'absoluteRenderBounds' in node && node.absoluteRenderBounds && 'absoluteBoundingBox' in node && node.absoluteBoundingBox) {
+    var hasVisibleStroke = node.strokes && node.strokes.length > 0 && node.strokeWeight > 0;
+    var isText = node.type === 'TEXT';
+    
+    if ((hasVisibleEffects || hasVisibleStroke || isText) && 'absoluteRenderBounds' in node && node.absoluteRenderBounds && 'absoluteBoundingBox' in node && node.absoluteBoundingBox) {
       var arb = node.absoluteRenderBounds;
       var abb = node.absoluteBoundingBox;
       // Compute how much the render extends beyond the bounding box on each side
@@ -334,8 +337,12 @@ async function main() {
     }
 
     if (node.type === 'TEXT') {
-      // ALL text → TextLabel (assembler emits as TextLabel for code binding)
+      // ALL text → TextLabel. Never rasterize text as PNG — game code expects .Text
       ir._isDynamic = true;
+      if (typeof isDynText === 'function' && isDynText(node)) {
+        ir._isDynamicPattern = true; // Mark for $ prefix in assembler
+      }
+      console.log('[FigmaForge] TEXT→TextLabel: ' + node.name + ' (' + node.id + ')');
     } else if (hasChildren && !isFlattenTag) {
       // Frame with children → CONTAINER (preserves hierarchy)
       // Any visible fill/stroke → _isHybrid → _BG ImageLabel from rasterized PNG
@@ -781,10 +788,9 @@ async function exportRasterNodes() {
     const hidden = [];
     async function walk(n) {
       if (n.type === 'TEXT' && n.visible) {
-        if (HIDE_TEXT_MODE === 'all' || (HIDE_TEXT_MODE === 'dynamic' && isDynText(n))) {
-          n.visible = false;
-          hidden.push(n);
-        }
+        // Always hide ALL text during container raster — text is emitted as TextLabel separately
+        n.visible = false;
+        hidden.push(n);
       } else if ('children' in n && n.children) {
         for (const c of n.children) await walk(c);
       }

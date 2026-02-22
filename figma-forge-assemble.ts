@@ -16,6 +16,7 @@ import {
   mapAutoLayout, mapLayoutSizing, computeCanvasSize,
   isScrollContainer, isDynamicText, RuntimeConfig,
   sanitizeTextForRoblox, isTemplateNode, stripConventionSuffix, isScrollConvention,
+  computeBackgroundTransparency,
 } from './figma-forge-shared';
 
 // ─── Constants ───────────────────────────────────────────────────
@@ -42,13 +43,12 @@ function classifyNode(
   node: FigmaForgeNode,
   config: RuntimeConfig,
 ): 'png' | 'text_dynamic' | 'container' {
-  // Handle text nodes based on textExportMode
-  if (node.type === 'TEXT') {
-    if (config.textExportMode === 'none') return 'png';
-    if (config.textExportMode === 'all') return 'text_dynamic';
-    // 'dynamic' mode: only emit TextLabel if it's dynamic
-    return isDynamicText(node, config) ? 'text_dynamic' : 'png';
-  }
+  // ALL text → TextLabel FIRST — takes priority over _isFlattened.
+  // Game code expects .Text property on every text node.
+  if (node.type === 'TEXT') return 'text_dynamic';
+
+  // Explicitly flattened nodes → always PNG
+  if (node._isFlattened) return 'png';
 
   // Leaf nodes (no children): always PNG
   if (!node.children || node.children.length === 0) {
@@ -190,7 +190,7 @@ function emitNode(
   parentWidth: number = 0,
   parentHeight: number = 0,
 ): string {
-  if (!node.visible || node._isStrokeDuplicate) return '';
+  if (node._isStrokeDuplicate) return '';
 
   const strategy = classifyNode(node, config);
 
@@ -233,13 +233,13 @@ function emitPngNode(
   // the solid fill is just Figma's underlying paint layer, so make bg transparent.
   const isSolidFrame = !!node._solidFill;
   const solidFillOnlyNoImage = isSolidFrame && !hasImage;
-  const bgTransparency = solidFillOnlyNoImage ? (1 - (node._solidFillOpacity ?? 1)) : 1;
+  const bgTransparency = solidFillOnlyNoImage ? computeBackgroundTransparency(node) : 1;
 
   const lines: string[] = [
     `<Item class="ImageLabel" referent="${ref}">`,
     `<Properties>`,
     `<string name="Name">${escapeXmlAttr(node.name)}</string>`,
-    `<bool name="Visible">true</bool>`,
+    `<bool name="Visible">${node.visible !== false}</bool>`,
     `<int name="ZIndex">${zIndex}</int>`,
     `<int name="BorderSizePixel">0</int>`,
     `<float name="BackgroundTransparency">${bgTransparency}</float>`,
@@ -256,7 +256,7 @@ function emitPngNode(
 
   const sizing = mapLayoutSizing(node.layoutSizingHorizontal, node.layoutSizingVertical);
   if (sizing.autoSizeToken > 0) {
-    lines.push(`<int name="AutomaticSize">${sizing.autoSizeToken}</int>`);
+    lines.push(`<token name="AutomaticSize">${sizing.autoSizeToken}</token>`);
   }
 
   if (hasImage) {
@@ -303,7 +303,7 @@ function emitDynamicTextNode(
   // Non-dynamic text (labels, designed text) keeps its original Figma name.
   const name = node.name.startsWith(config.dynamicPrefix)
     ? node.name
-    : isDynamicText(node, config)
+    : node._isDynamicPattern
       ? `${config.dynamicPrefix}${node.name}`
       : node.name;
 
@@ -332,7 +332,7 @@ function emitDynamicTextNode(
     `<Item class="TextLabel" referent="${ref}">`,
     `<Properties>`,
     `<string name="Name">${escapeXmlAttr(name)}</string>`,
-    `<bool name="Visible">true</bool>`,
+    `<bool name="Visible">${node.visible !== false}</bool>`,
     `<int name="ZIndex">${zIndex}</int>`,
     `<int name="BorderSizePixel">0</int>`,
     `<float name="BackgroundTransparency">1</float>`,
@@ -349,9 +349,9 @@ function emitDynamicTextNode(
 
   if (anchorXml) lines.push(anchorXml);
 
-  // Dynamic text gets AutomaticSize=2 (Y) so the label grows vertically if text wraps
+  // Dynamic text gets AutomaticSize=Y so the label grows vertically if text wraps
   if (isDynamic) {
-    lines.push(`<int name="AutomaticSize">2</int>`);
+    lines.push(`<token name="AutomaticSize">2</token>`);  // Y=2
   }
 
   // Text transparency from node opacity
@@ -411,23 +411,23 @@ function emitContainerNode(
   const className = isScroll ? 'ScrollingFrame' : 'Frame';
   const sizing = mapLayoutSizing(node.layoutSizingHorizontal, node.layoutSizingVertical);
 
-  // ── Render bounds fix
+  // ── Container Frame ALWAYS uses Figma's exact node size ──
+  // Render bounds expansion (for drop shadows, blurs) is ONLY applied to the _BG ImageLabel,
+  // NOT to the container Frame. Expanding the Frame pushes children out of alignment
+  // and causes neighboring elements (like title bars) to not fill the parent width.
   const rb = (node as any)._renderBounds as { x: number; y: number; width: number; height: number } | undefined;
-  const hasRenderBounds = !!(rb && (node as any)._isHybrid);
-  const effectiveWidth = hasRenderBounds ? rb!.width : node.width;
-  const effectiveHeight = hasRenderBounds ? rb!.height : node.height;
   
-  const [posXml, sizeXml, anchorXml] = emitGeometry(node, isRoot, parentHasAutoLayout, parentWidth, parentHeight, Math.round(effectiveWidth), Math.round(effectiveHeight));
+  const [posXml, sizeXml, anchorXml] = emitGeometry(node, isRoot, parentHasAutoLayout, parentWidth, parentHeight, Math.round(node.width), Math.round(node.height));
 
   const hasBgUnderlay = !isRoot && !!((node as any)._isHybrid && (node as any)._resolvedImageId);
-  const solidFill = !isRoot ? (node as any)._solidFill as FigmaColor | undefined : undefined;
-  const bgTransparency = solidFill ? 0 : 1;
+  const solidFill = (node as any)._solidFill as FigmaColor | undefined;
+  const bgTransparency = solidFill ? computeBackgroundTransparency(node) : 1;
 
   const lines: string[] = [
     `<Item class="${className}" referent="${ref}">`,
     `<Properties>`,
     `<string name="Name">${escapeXmlAttr(node.name)}</string>`,
-    `<bool name="Visible">true</bool>`,
+    `<bool name="Visible">${node.visible !== false}</bool>`,
     `<int name="ZIndex">${zIndex}</int>`,
     `<int name="BorderSizePixel">0</int>`,
     `<float name="BackgroundTransparency">${bgTransparency}</float>`,
@@ -452,14 +452,13 @@ function emitContainerNode(
   }
 
   if (sizing.autoSizeToken > 0) {
-    lines.push(`<int name="AutomaticSize">${sizing.autoSizeToken}</int>`);
+    lines.push(`<token name="AutomaticSize">${sizing.autoSizeToken}</token>`);
   }
 
   if (node.clipsContent && !isScroll && !isRoot) {
-    // Hybrid containers with render bounds have been expanded to fit effects (shadows, blurs).
-    // Enabling ClipsDescendants would clip those effects, defeating the purpose.
-    const shouldClip = hasRenderBounds ? false : true;
-    lines.push(`<bool name="ClipsDescendants">${shouldClip}</bool>`);
+    // Hybrid containers with render bounds may have effects that extend beyond node bounds.
+    // The frame itself uses exact Figma size, but _BG extends for effects — so clipping is safe.
+    lines.push(`<bool name="ClipsDescendants">true</bool>`);
   }
 
   if (isRoot) {
@@ -469,7 +468,7 @@ function emitContainerNode(
   // ScrollingFrame properties
   if (isScroll) {
     const canvasSize = computeCanvasSize(node);
-    lines.push(`<Vector2 name="CanvasSize"><X>${Math.round(canvasSize.width)}</X><Y>${Math.round(canvasSize.height)}</Y></Vector2>`);
+    lines.push(`<UDim2 name="CanvasSize"><XS>0</XS><XO>${Math.round(canvasSize.width)}</XO><YS>0</YS><YO>${Math.round(canvasSize.height)}</YO></UDim2>`);
     lines.push(`<int name="ScrollBarThickness">${DEFAULT_SCROLLBAR_THICKNESS}</int>`);
     lines.push(`<bool name="ScrollingEnabled">true</bool>`);
   }
@@ -499,6 +498,16 @@ function emitContainerNode(
   if ((node as any)._isHybrid && (node as any)._resolvedImageId) {
     const bgRef = nextRef();
     const bgAsset = (node as any)._resolvedImageId as string;
+    // _BG size: if render bounds exist AND this is NOT the root container,
+    // the PNG includes effects (shadows/blurs) that extend beyond node bounds.
+    // ROOT containers should NOT expand _BG — the outer shadow is unnecessary
+    // in-game (modal floats over dimmed overlay) and causes children (like title bars)
+    // to appear narrower than the dark background.
+    const hasRenderBounds = !isRoot && !!(rb && (rb.width > node.width + 0.5 || rb.height > node.height + 0.5));
+    const bgXO = hasRenderBounds ? Math.round(rb!.x - node.x) : 0;
+    const bgYO = hasRenderBounds ? Math.round(rb!.y - node.y) : 0;
+    const bgW = hasRenderBounds ? Math.round(rb!.width) : 0;
+    const bgH = hasRenderBounds ? Math.round(rb!.height) : 0;
     lines.push(`<Item class="ImageLabel" referent="${bgRef}">`);
     lines.push(`<Properties>`);
     lines.push(`<string name="Name">_BG</string>`);
@@ -506,8 +515,15 @@ function emitContainerNode(
     lines.push(`<int name="ZIndex">0</int>`);  // ZIndex=0: behind all children (children start at 2+)
     lines.push(`<int name="BorderSizePixel">0</int>`);
     lines.push(`<float name="BackgroundTransparency">1</float>`);
-    lines.push(`<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`);
-    lines.push(`<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>1</YS><YO>0</YO></UDim2>`);
+    if (hasRenderBounds) {
+      // Absolute position/size for effects-expanded PNGs
+      lines.push(`<UDim2 name="Position"><XS>0</XS><XO>${bgXO}</XO><YS>0</YS><YO>${bgYO}</YO></UDim2>`);
+      lines.push(`<UDim2 name="Size"><XS>0</XS><XO>${bgW}</XO><YS>0</YS><YO>${bgH}</YO></UDim2>`);
+    } else {
+      // No effects or ROOT: _BG fills the container exactly (stretch to fit)
+      lines.push(`<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`);
+      lines.push(`<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>1</YS><YO>0</YO></UDim2>`);
+    }
     lines.push(`<Content name="Image"><url>${bgAsset}</url></Content>`);
     lines.push(`<token name="ScaleType">0</token>`);
     lines.push(`</Properties>`);
@@ -577,8 +593,8 @@ function emitContainerNode(
         const cy = Math.round(child.y);
         const cw = Math.round(child.width);
         const ch = Math.round(child.height);
-        const pw = Math.round(effectiveWidth);
-        const ph = Math.round(effectiveHeight);
+        const pw = Math.round(node.width);
+        const ph = Math.round(node.height);
         if (cx < 0 || cy < 0) {
           // Negative positions now safely preserved by UDim2 translation and Content wrapping
         }
@@ -587,7 +603,7 @@ function emitContainerNode(
         }
       }
 
-      lines.push(emitNode(child, config, childZ, false, thisHasAutoLayout, effectiveWidth, effectiveHeight));
+      lines.push(emitNode(child, config, childZ, false, thisHasAutoLayout, node.width, node.height));
     });
   }
 

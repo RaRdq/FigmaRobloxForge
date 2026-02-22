@@ -249,7 +249,7 @@ async function main(): Promise<void> {
   // Properties that Rojo requires as <int>, NOT <token>
   // Source: Rojo crashes with "unexpected property type" for these
   const ROJO_INT_PROPERTIES = [
-    'AutomaticSize', 'ScrollBarThickness', 'BorderSizePixel',
+    'ScrollBarThickness', 'BorderSizePixel',
     'ZIndex', 'LayoutOrder', 'DisplayOrder',
   ];
   for (const prop of ROJO_INT_PROPERTIES) {
