@@ -170,62 +170,14 @@ async function pollOperation(operationPath: string, apiKey: string, maxAttempts:
 }
 
 /**
- * Resolve a Decal asset ID to its underlying Image/texture ID.
- * Decals wrap an Image — ImageLabel.Image needs the texture ID, not the Decal ID.
- * Uses the Roblox asset details API (v1) to look up the mapping.
+ * Removed resolveDecalToImageId since we now upload Images directly.
  */
-async function resolveDecalToImageId(decalId: string): Promise<string> {
-  // Try the asset details batch API
-  const resp = await fetch(`https://assetdelivery.roblox.com/v1/asset/?id=${decalId}`, {
-    redirect: 'manual',
-  });
-
-  // The asset delivery redirect contains the actual texture URL —
-  // but we can also parse the XML content of the Decal asset
-  if (resp.status === 200) {
-    const text = await resp.text();
-    // Decal XML contains: <url>http://www.roblox.com/asset/?id=XXXXXXXXX</url>
-    const match = text.match(/asset\/?\?id=(\d+)/);
-    if (match) return match[1];
-  }
-
-  // Fallback: try the economy/asset-details endpoint (no auth needed)
-  try {
-    const detailResp = await fetch(`https://economy.roblox.com/v2/assets/${decalId}/details`);
-    if (detailResp.ok) {
-      const detail = await detailResp.json() as any;
-      // For Decals, the asset contains a reference to the underlying Image
-      if (detail.AssetId) {
-        // The Decal product page itself — try to get its content
-        const contentResp = await fetch(`https://assetdelivery.roblox.com/v1/assetId/${decalId}`);
-        if (contentResp.ok) {
-          const contentData = await contentResp.json() as any;
-          if (contentData.location) {
-            const assetContent = await fetch(contentData.location);
-            const assetText = await assetContent.text();
-            const imageMatch = assetText.match(/asset\/?\?id=(\d+)/);
-            if (imageMatch) return imageMatch[1];
-          }
-        }
-      }
-    }
-  } catch { /* continue to fallback */ }
-
-  // Final fallback: Roblox convention — Image ID = Decal ID + 1
-  // This is a well-known hack that works for most uploaded assets
-  console.warn(`[FigmaForge] ⚠ Could not resolve Decal ${decalId} to Image ID, using ID+1 convention`);
-  return String(BigInt(decalId) + 1n);
-}
 
 /**
- * Upload a single PNG image buffer to Roblox as a Decal via Open Cloud API.
- * Decals are public (unlike Image assets which are private/403).
- * After upload, resolves the Decal ID to the underlying Image/texture ID
- * for use in ImageLabel.Image = "rbxassetid://XXXXX".
- *
+ * Upload a single PNG image buffer to Roblox as an Image via Open Cloud API.
  * Uses manual multipart construction with explicit Content-Length (Node.js native
  * FormData sends empty body to Roblox).
- * Returns the Image (texture) assetId string. Throws on failure.
+ * Returns the Image assetId string. Throws on failure.
  */
 async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise<string> {
   const config = getConfig();
@@ -233,7 +185,7 @@ async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise
   const CRLF = '\r\n';
 
   const requestBody = JSON.stringify({
-    assetType: 'Decal',
+    assetType: 'Image',
     displayName: displayName.slice(0, 50),
     description: 'Uploaded by FigmaForge image pipeline',
     creationContext: {
@@ -296,8 +248,11 @@ async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise
     throw new Error(`[FigmaForge] Could not extract Decal assetId from Roblox response: ${JSON.stringify(result).slice(0, 300)}`);
   }
 
-  // Return the Decal ID directly — Roblox in-game engine resolves
-  // rbxassetid://DECAL_ID to the underlying texture automatically
+  // Return the raw Decal ID — we use rbxthumb:// format in the URL builder
+  // to resolve Decal assets for ImageLabel.Image display.
+  // Open Cloud API Decal uploads: ID+1 does NOT exist, rbxassetid:// with
+  // Decal ID shows blank. rbxthumb:// is the official Roblox solution.
+  console.log(`[FigmaForge]   ✅ Decal asset ${decalId} (Approved)`);
   return decalId;
 }
 
