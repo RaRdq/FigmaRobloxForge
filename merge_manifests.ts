@@ -76,7 +76,7 @@ let preResolved = 0;
 function applyFromCache(node: FigmaForgeNode, cache: Record<string, CacheEntry>): number {
   let count = 0;
   if (node._rasterizedImageHash && cache[node._rasterizedImageHash]) {
-    node._resolvedImageId = `rbxassetid://${cache[node._rasterizedImageHash].assetId}`;
+    node._resolvedImageId = `rbxthumb://type=Asset&id=${cache[node._rasterizedImageHash].assetId}&w=420&h=420`;
     // console.log(`  ✅ Pre-resolved [${node.name}] ${node._rasterizedImageHash} → ${node._resolvedImageId}`);
     count++;
   }

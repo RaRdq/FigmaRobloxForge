@@ -260,7 +260,9 @@ function emitPngNode(
   }
 
   if (hasImage) {
-    lines.push(`<Content name="Image"><url>${assetId}</url></Content>`);
+    // XML-escape the URL (rbxthumb:// contains & which must be &amp; in XML)
+    const xmlSafeUrl = assetId.replace(/&/g, '&amp;');
+    lines.push(`<Content name="Image"><url>${xmlSafeUrl}</url></Content>`);
     // 9-slice if metadata present, else Stretch (pixel-exact PNG)
     const slice = (node as any)._sliceCenter;
     if (slice) {
@@ -419,37 +421,32 @@ function emitContainerNode(
   
   const [posXml, sizeXml, anchorXml] = emitGeometry(node, isRoot, parentHasAutoLayout, parentWidth, parentHeight, Math.round(node.width), Math.round(node.height));
 
-  const hasBgUnderlay = !isRoot && !!((node as any)._isHybrid && (node as any)._resolvedImageId);
+  const hasRasterBG = !!((node as any)._isHybrid && (node as any)._resolvedImageId);
   const solidFill = (node as any)._solidFill as FigmaColor | undefined;
   const solidFillOpacity = (node as any)._solidFillOpacity as number | undefined;
 
   // ── Background color/transparency computation ──
-  // Priority: 1) _solidFill + _solidFillOpacity (set during extraction, most reliable)
-  //           2) node.fills array (fallback if _solidFill not set but fills exist)
-  //           3) _isHybrid without resolved image → use fills or default opaque
-  //           4) Default: fully transparent (no fill, pure container)
   let bgTransparency = 1;
-  let bgColor: FigmaColor | undefined = solidFill;
+  let bgColor: FigmaColor | undefined = undefined;
 
-  if (solidFill) {
-    // Use _solidFillOpacity directly — don't re-compute from node.fills (which may be missing)
+  if (hasRasterBG) {
+    // If a rasterized background image (ImageLabel) will be injected, the container Frame
+    // must be fully transparent to prevent solid colors (like Roblox's default gray)
+    // from rendering behind rounded corners, drop shadows, or translucent pixels in the PNG.
+    bgTransparency = 1;
+  } else if (solidFill) {
+    // Pure solid fills (optimized in extract.ts to bypass PNG rasterization entirely)
     const fillOpacity = (solidFillOpacity ?? 1) * (node.opacity ?? 1);
     bgTransparency = round(1 - fillOpacity);
+    bgColor = solidFill;
   } else if (node.fills && Array.isArray(node.fills) && node.fills.length > 0) {
-    // Fallback: compute from fills array if present
-    const primaryFill = node.fills.find((f: any) => f.visible !== false && f.type !== 'IMAGE');
-    if (primaryFill) {
+    // Fallback for solid fills not caught by extract.ts
+    const primaryFill = node.fills.find((f: any) => f.visible !== false && f.type === 'SOLID');
+    if (primaryFill && primaryFill.color) {
       bgColor = primaryFill.color;
       const fillOpacity = (primaryFill.opacity ?? 1) * (node.opacity ?? 1);
       bgTransparency = round(1 - fillOpacity);
     }
-  } else if ((node as any)._isHybrid && !(node as any)._resolvedImageId) {
-    // Hybrid container (gradient/complex fill) but image not yet uploaded.
-    // The background is NOT a simple solid — it needs the rasterized PNG.
-    // Set a minimal visible background as fallback so the container isn't invisible.
-    // This is a degraded rendering — the full quality comes when images are resolved.
-    bgTransparency = 0;
-    bgColor = { r: 0.15, g: 0.15, b: 0.2, a: 1 }; // Dark navy fallback for unresolved hybrid BGs
   }
 
   const lines: string[] = [
@@ -524,7 +521,7 @@ function emitContainerNode(
   // image fills, complex effects) emit ImageLabel "_BG" at ZIndex=1 from a rasterized PNG.
   // Pure solid fills are handled above via BackgroundColor3 on the Frame — no PNG needed.
   // _isHybrid is ONLY true for non-solid backgrounds (set in extract.ts).
-  if ((node as any)._isHybrid && (node as any)._resolvedImageId) {
+  if (hasRasterBG) {
     const bgRef = nextRef();
     const bgAsset = (node as any)._resolvedImageId as string;
     // _BG size: if render bounds exist AND this is NOT the root container,
@@ -569,7 +566,7 @@ function emitContainerNode(
     lines.push(`<Item class="Frame" referent="${cRef}"><Properties>`);
     lines.push(`<string name="Name">Content</string>`);
     lines.push(`<bool name="Visible">true</bool>`);
-    lines.push(`<int name="ZIndex">${hasBgUnderlay ? 2 : 1}</int>`);
+    lines.push(`<int name="ZIndex">${(!isRoot && hasRasterBG) ? 2 : 1}</int>`);
     lines.push(`<int name="BorderSizePixel">0</int>`);
     lines.push(`<float name="BackgroundTransparency">1</float>`);
     lines.push(`<UDim2 name="Position"><XS>0</XS><XO>0</XO><YS>0</YS><YO>0</YO></UDim2>`);
