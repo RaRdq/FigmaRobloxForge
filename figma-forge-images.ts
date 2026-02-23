@@ -226,34 +226,30 @@ async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise
   }
 
   const result = await resp.json() as any;
-  let decalId: string | undefined;
+  let imageAssetId: string | undefined;
 
   // Check if directly done
   if (result.done) {
-    decalId = result.response?.assetId ? String(result.response.assetId) : undefined;
+    imageAssetId = result.response?.assetId ? String(result.response.assetId) : undefined;
   }
 
   // Poll async operation
-  if (!decalId && result.path) {
+  if (!imageAssetId && result.path) {
     const final = await pollOperation(result.path, config.apiKey);
-    decalId = final?.response?.assetId ? String(final.response.assetId) : undefined;
+    imageAssetId = final?.response?.assetId ? String(final.response.assetId) : undefined;
   }
 
   // Direct assetId in response
-  if (!decalId && result.assetId) {
-    decalId = String(result.assetId);
+  if (!imageAssetId && result.assetId) {
+    imageAssetId = String(result.assetId);
   }
 
-  if (!decalId) {
-    throw new Error(`[FigmaForge] Could not extract Decal assetId from Roblox response: ${JSON.stringify(result).slice(0, 300)}`);
+  if (!imageAssetId) {
+    throw new Error(`[FigmaForge] Could not extract Image assetId from Roblox response: ${JSON.stringify(result).slice(0, 300)}`);
   }
 
-  // Return the raw Decal ID — we use rbxthumb:// format in the URL builder
-  // to resolve Decal assets for ImageLabel.Image display.
-  // Open Cloud API Decal uploads: ID+1 does NOT exist, rbxassetid:// with
-  // Decal ID shows blank. rbxthumb:// is the official Roblox solution.
-  console.log(`[FigmaForge]   ✅ Decal asset ${decalId} (Approved)`);
-  return decalId;
+  console.log(`[FigmaForge]   ✅ Image asset ${imageAssetId} (Approved)`);
+  return imageAssetId;
 }
 
 // ─── Tree Walker ─────────────────────────────────────────────────

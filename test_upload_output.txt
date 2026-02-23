@@ -1,0 +1,37 @@
+Test file: images/raster_52_438.png (658371 bytes)
+
+=== Decal Upload ===
+Status: 200
+Operation path: operations/82dce9fd-8e46-442b-863a-785562a461a7
+  Poll 1: not done yet...
+  Poll 2: not done yet...
+FULL FINAL RESPONSE:
+{
+  "path": "operations/82dce9fd-8e46-442b-863a-785562a461a7",
+  "operationId": "82dce9fd-8e46-442b-863a-785562a461a7",
+  "done": true,
+  "response": {
+    "path": "assets/111840523746427",
+    "revisionId": "1",
+    "revisionCreateTime": "2026-02-23T13:14:15.531361900Z",
+    "assetId": "111840523746427",
+    "displayName": "FigmaForge_Test_Decal",
+    "description": "Test upload",
+    "assetType": "Decal",
+    "creationContext": {
+      "creator": {
+        "userId": "10436610806"
+      }
+    },
+    "moderationResult": {
+      "moderationState": "Approved"
+    },
+    "state": "Active"
+  }
+}
+
+=== ID Analysis ===
+Decal ID: 111840523746427
+Decal ID + 1: 111840523746428
+rbxassetid://  (decal): rbxassetid://111840523746427
+rbxassetid:// (decal+1): rbxassetid://111840523746428

@@ -130,8 +130,28 @@ function emitGeometry(
   }
 
   // Parse Constraints
-  const hc = node.constraints?.horizontal ?? 'MIN';
-  const vc = node.constraints?.vertical ?? 'MIN';
+  let hc = node.constraints?.horizontal ?? 'MIN';
+  let vc = node.constraints?.vertical ?? 'MIN';
+
+  // --- SOW_UI_AAA Layout Overrides ---
+  // 1. Force TitleBar to stretch across the full width of the Modal
+  if (node.name === 'TitleBar') {
+    hc = 'STRETCH';
+  }
+  // 2. Buy Buttons need their internal TextLabels perfectly centered
+  if (node.type === 'TEXT' && (node as any).parent?.name?.includes('Btn') && !parentHasAutoLayout) {
+    hc = 'CENTER';
+    vc = 'CENTER';
+  }
+  // 3. Prevent Double Text on PricePills (especially for Luck Upgrade where the parent has a background and text is drawn twice)
+  if (node.type === 'FRAME' && node.name === 'PricePill' && node.children) {
+    // If we have a TextLabel inside, we want to ensure we don't accidentally render its duplicate
+    const textChildren = node.children.filter(c => c.type === 'TEXT');
+    if (textChildren.length > 1) {
+      // Remove all but the last Text node (usually the uppermost in Figma stacking order)
+      node.children = node.children.filter(c => c.type !== 'TEXT' || c.id === textChildren[textChildren.length - 1].id);
+    }
+  }
   
   let pxs = 0, pxo = Math.round(node.x), sxs = 0, sxo = defaultSizeXOff, ax = 0;
   let pys = 0, pyo = Math.round(node.y), sys = 0, syo = defaultSizeYOff, ay = 0;
@@ -260,7 +280,7 @@ function emitPngNode(
   }
 
   if (hasImage) {
-    // XML-escape the URL (rbxthumb:// contains & which must be &amp; in XML)
+    // XML-escape the URL (ampersands must be &amp; in XML attributes)
     const xmlSafeUrl = assetId.replace(/&/g, '&amp;');
     lines.push(`<Content name="Image"><url>${xmlSafeUrl}</url></Content>`);
     // 9-slice if metadata present, else Stretch (pixel-exact PNG)
@@ -524,6 +544,7 @@ function emitContainerNode(
   if (hasRasterBG) {
     const bgRef = nextRef();
     const bgAsset = (node as any)._resolvedImageId as string;
+    console.log("[DEBUG bgAsset]", bgAsset, "for node", node.name);
     // _BG size: if render bounds exist AND this is NOT the root container,
     // the PNG includes effects (shadows/blurs) that extend beyond node bounds.
     // ROOT containers should NOT expand _BG — the outer shadow is unnecessary
@@ -607,7 +628,7 @@ function emitContainerNode(
   const thisHasAutoLayout = !!al;
   // If wrapped in Content, Content frame provides Z-isolation, so children start at 1.
   // Otherwise, children must render above the _BG underlay.
-  const childZBase = useContentWrapper ? 1 : (hasBgUnderlay ? 2 : 1);
+  const childZBase = useContentWrapper ? 1 : (hasRasterBG ? 2 : 1);
   let maxChildZ = 0;
   if (node.children) {
     node.children.forEach((child, i) => {

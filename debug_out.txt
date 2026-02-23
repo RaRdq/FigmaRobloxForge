@@ -1,0 +1,3 @@
+[DEBUG bgAsset] rbxassetid://105664507540593 for node EventBanner_Active
+Γ£à Generated ../../src/StarterGui/EventBanner_Active.rbxmx
+≡ƒôï Generated ../../src/StarterGui/EventBanner_Active.bindings.json
