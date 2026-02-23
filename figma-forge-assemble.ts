@@ -700,7 +700,7 @@ export function assembleRbxmx(
     `<bool name="IgnoreGuiInset">true</bool>` +
     `<bool name="ResetOnSpawn">false</bool>` +
     `<token name="ZIndexBehavior">1</token>` +
-    `<bool name="Enabled">true</bool>` +
+    `<bool name="Enabled">false</bool>` +
     `<int name="DisplayOrder">50</int>` +
     `</Properties>${body}</Item>`;
 
