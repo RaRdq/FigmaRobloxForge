@@ -351,7 +351,7 @@ function emitDynamicTextNode(
 
   // Dynamic text gets AutomaticSize=Y so the label grows vertically if text wraps
   if (isDynamic) {
-    lines.push(`<token name="AutomaticSize">2</token>`);  // Y=2
+    lines.push(`<token name="AutomaticSize">2</token>`);  // Y
   }
 
   // Text transparency from node opacity
@@ -421,7 +421,36 @@ function emitContainerNode(
 
   const hasBgUnderlay = !isRoot && !!((node as any)._isHybrid && (node as any)._resolvedImageId);
   const solidFill = (node as any)._solidFill as FigmaColor | undefined;
-  const bgTransparency = solidFill ? computeBackgroundTransparency(node) : 1;
+  const solidFillOpacity = (node as any)._solidFillOpacity as number | undefined;
+
+  // ── Background color/transparency computation ──
+  // Priority: 1) _solidFill + _solidFillOpacity (set during extraction, most reliable)
+  //           2) node.fills array (fallback if _solidFill not set but fills exist)
+  //           3) _isHybrid without resolved image → use fills or default opaque
+  //           4) Default: fully transparent (no fill, pure container)
+  let bgTransparency = 1;
+  let bgColor: FigmaColor | undefined = solidFill;
+
+  if (solidFill) {
+    // Use _solidFillOpacity directly — don't re-compute from node.fills (which may be missing)
+    const fillOpacity = (solidFillOpacity ?? 1) * (node.opacity ?? 1);
+    bgTransparency = round(1 - fillOpacity);
+  } else if (node.fills && Array.isArray(node.fills) && node.fills.length > 0) {
+    // Fallback: compute from fills array if present
+    const primaryFill = node.fills.find((f: any) => f.visible !== false && f.type !== 'IMAGE');
+    if (primaryFill) {
+      bgColor = primaryFill.color;
+      const fillOpacity = (primaryFill.opacity ?? 1) * (node.opacity ?? 1);
+      bgTransparency = round(1 - fillOpacity);
+    }
+  } else if ((node as any)._isHybrid && !(node as any)._resolvedImageId) {
+    // Hybrid container (gradient/complex fill) but image not yet uploaded.
+    // The background is NOT a simple solid — it needs the rasterized PNG.
+    // Set a minimal visible background as fallback so the container isn't invisible.
+    // This is a degraded rendering — the full quality comes when images are resolved.
+    bgTransparency = 0;
+    bgColor = { r: 0.15, g: 0.15, b: 0.2, a: 1 }; // Dark navy fallback for unresolved hybrid BGs
+  }
 
   const lines: string[] = [
     `<Item class="${className}" referent="${ref}">`,
@@ -437,9 +466,9 @@ function emitContainerNode(
 
   if (anchorXml) lines.push(anchorXml);
 
-  // Solid fill → set BackgroundColor3 directly on Frame (no ImageLabel needed)
-  if (solidFill) {
-    lines.push(colorXml('BackgroundColor3', solidFill));
+  // Set BackgroundColor3 from solid fill, computed fill, or hybrid fallback
+  if (bgColor) {
+    lines.push(colorXml('BackgroundColor3', bgColor));
   }
 
   if (isRoot && !anchorXml) {
@@ -557,7 +586,7 @@ function emitContainerNode(
     const llRef = nextRef();
     lines.push(`<Item class="UIListLayout" referent="${llRef}"><Properties>`);
     lines.push(`<token name="FillDirection">${al.fillDirection === 'Horizontal' ? 0 : 1}</token>`);
-    lines.push(`<UDim name="Padding"><S>0</S><O>${al.padding}</O></UDim>`);
+    lines.push(`<UDim name="Padding"><S>0</S><O>${al.padding || 0}</O></UDim>`);
     lines.push(`<token name="HorizontalAlignment">${al.horizontalAlignment === 'Center' ? 1 : (al.horizontalAlignment === 'Right' ? 2 : 0)}</token>`);
     lines.push(`<token name="VerticalAlignment">${al.verticalAlignment === 'Center' ? 1 : (al.verticalAlignment === 'Bottom' ? 2 : 0)}</token>`);
     lines.push(`<token name="SortOrder">2</token>`);

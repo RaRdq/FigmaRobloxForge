@@ -336,14 +336,22 @@ async function main() {
       hasVisualBackground = false; 
     }
 
-    if (node.type === 'TEXT') {
+    if (isFlattenTag) {
+      // [Flatten] / [Raster] / [Flattened] tag → ALWAYS export as single PNG
+      // This MUST come FIRST — overrides TEXT / CONTAINER classification
+      ir._isFlattened = true;
+      if ('exportAsync' in node) {
+        rasterQueue.push({ irNode: ir, figmaNode: node });
+        console.log('[FigmaForge] [Flatten] PNG slice: ' + node.name + ' (' + node.id + ')');
+      }
+    } else if (node.type === 'TEXT') {
       // ALL text → TextLabel. Never rasterize text as PNG — game code expects .Text
       ir._isDynamic = true;
       if (typeof isDynText === 'function' && isDynText(node)) {
         ir._isDynamicPattern = true; // Mark for $ prefix in assembler
       }
       console.log('[FigmaForge] TEXT→TextLabel: ' + node.name + ' (' + node.id + ')');
-    } else if (hasChildren && !isFlattenTag) {
+    } else if (hasChildren) {
       // Frame with children → CONTAINER (preserves hierarchy)
       // Any visible fill/stroke → _isHybrid → _BG ImageLabel from rasterized PNG
       ir._isHybrid = hasVisualBackground;
@@ -354,7 +362,7 @@ async function main() {
         console.log('[FigmaForge] Container (no-bg): ' + node.name + ' (' + node.id + ')');
       }
     } else {
-      // Leaf visual / [Flatten]-tagged → export as single PNG
+      // Leaf visual (childless, no tag) → export as single PNG
       ir._isFlattened = true;
       if ('exportAsync' in node) {
         rasterQueue.push({ irNode: ir, figmaNode: node });
@@ -364,7 +372,7 @@ async function main() {
 
     // Clean name tags
     if (isFlattenTag) {
-      ir.name = ir.name.replace(/\[Flatten\]\s*/g, '').replace(/\[Raster\]\s*/g, '').replace(/\[Flattened\]\s*/g, '').trim();
+      ir.name = ir.name.replace(/\\[Flatten\\]\\s*/g, '').replace(/\\[Raster\\]\\s*/g, '').replace(/\\[Flattened\\]\\s*/g, '').trim();
     }
 
     // ── Children Processing ──

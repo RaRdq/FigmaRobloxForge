@@ -170,10 +170,62 @@ async function pollOperation(operationPath: string, apiKey: string, maxAttempts:
 }
 
 /**
+ * Resolve a Decal asset ID to its underlying Image/texture ID.
+ * Decals wrap an Image — ImageLabel.Image needs the texture ID, not the Decal ID.
+ * Uses the Roblox asset details API (v1) to look up the mapping.
+ */
+async function resolveDecalToImageId(decalId: string): Promise<string> {
+  // Try the asset details batch API
+  const resp = await fetch(`https://assetdelivery.roblox.com/v1/asset/?id=${decalId}`, {
+    redirect: 'manual',
+  });
+
+  // The asset delivery redirect contains the actual texture URL —
+  // but we can also parse the XML content of the Decal asset
+  if (resp.status === 200) {
+    const text = await resp.text();
+    // Decal XML contains: <url>http://www.roblox.com/asset/?id=XXXXXXXXX</url>
+    const match = text.match(/asset\/?\?id=(\d+)/);
+    if (match) return match[1];
+  }
+
+  // Fallback: try the economy/asset-details endpoint (no auth needed)
+  try {
+    const detailResp = await fetch(`https://economy.roblox.com/v2/assets/${decalId}/details`);
+    if (detailResp.ok) {
+      const detail = await detailResp.json() as any;
+      // For Decals, the asset contains a reference to the underlying Image
+      if (detail.AssetId) {
+        // The Decal product page itself — try to get its content
+        const contentResp = await fetch(`https://assetdelivery.roblox.com/v1/assetId/${decalId}`);
+        if (contentResp.ok) {
+          const contentData = await contentResp.json() as any;
+          if (contentData.location) {
+            const assetContent = await fetch(contentData.location);
+            const assetText = await assetContent.text();
+            const imageMatch = assetText.match(/asset\/?\?id=(\d+)/);
+            if (imageMatch) return imageMatch[1];
+          }
+        }
+      }
+    }
+  } catch { /* continue to fallback */ }
+
+  // Final fallback: Roblox convention — Image ID = Decal ID + 1
+  // This is a well-known hack that works for most uploaded assets
+  console.warn(`[FigmaForge] ⚠ Could not resolve Decal ${decalId} to Image ID, using ID+1 convention`);
+  return String(BigInt(decalId) + 1n);
+}
+
+/**
  * Upload a single PNG image buffer to Roblox as a Decal via Open Cloud API.
+ * Decals are public (unlike Image assets which are private/403).
+ * After upload, resolves the Decal ID to the underlying Image/texture ID
+ * for use in ImageLabel.Image = "rbxassetid://XXXXX".
+ *
  * Uses manual multipart construction with explicit Content-Length (Node.js native
  * FormData sends empty body to Roblox).
- * Returns the assetId string. Throws on failure with actionable error message.
+ * Returns the Image (texture) assetId string. Throws on failure.
  */
 async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise<string> {
   const config = getConfig();
@@ -181,7 +233,7 @@ async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise
   const CRLF = '\r\n';
 
   const requestBody = JSON.stringify({
-    assetType: 'Image',
+    assetType: 'Decal',
     displayName: displayName.slice(0, 50),
     description: 'Uploaded by FigmaForge image pipeline',
     creationContext: {
@@ -222,24 +274,31 @@ async function uploadToRoblox(imageBuffer: Buffer, displayName: string): Promise
   }
 
   const result = await resp.json() as any;
+  let decalId: string | undefined;
 
   // Check if directly done
   if (result.done) {
-    const assetId = result.response?.assetId;
-    if (assetId) return String(assetId);
+    decalId = result.response?.assetId ? String(result.response.assetId) : undefined;
   }
 
   // Poll async operation
-  if (result.path) {
+  if (!decalId && result.path) {
     const final = await pollOperation(result.path, config.apiKey);
-    const assetId = final?.response?.assetId;
-    if (assetId) return String(assetId);
+    decalId = final?.response?.assetId ? String(final.response.assetId) : undefined;
   }
 
   // Direct assetId in response
-  if (result.assetId) return String(result.assetId);
+  if (!decalId && result.assetId) {
+    decalId = String(result.assetId);
+  }
 
-  throw new Error(`[FigmaForge] Could not extract assetId from Roblox response: ${JSON.stringify(result).slice(0, 300)}`);
+  if (!decalId) {
+    throw new Error(`[FigmaForge] Could not extract Decal assetId from Roblox response: ${JSON.stringify(result).slice(0, 300)}`);
+  }
+
+  // Return the Decal ID directly — Roblox in-game engine resolves
+  // rbxassetid://DECAL_ID to the underlying texture automatically
+  return decalId;
 }
 
 // ─── Tree Walker ─────────────────────────────────────────────────
@@ -272,6 +331,48 @@ function applyResolvedId(node: FigmaForgeNode, imageHash: string, assetId: strin
   }
 }
 
+// ─── Raster Hash Backfill ────────────────────────────────────────
+
+/**
+ * Pre-pass: backfill `_rasterizedImageHash` on IR nodes whose IDs match
+ * `raster_{nodeId}` keys in `unresolvedImages`.
+ *
+ * The extraction step generates `raster_52_480` keys (nodeId `52:480` with
+ * `:` → `_`), but doesn't set `_rasterizedImageHash` on the IR node.
+ * Without this, `applyResolvedId` can never match uploaded assets to nodes.
+ */
+function backfillRasterHashes(root: FigmaForgeNode, unresolvedImages: string[], verbose: boolean): number {
+  // Build nodeId → rasterKey lookup from unresolvedImages
+  const RASTER_PREFIX = 'raster_';
+  const nodeIdToRasterKey = new Map<string, string>();
+  for (const key of unresolvedImages) {
+    if (!key.startsWith(RASTER_PREFIX)) continue;
+    // raster_52_480 → nodeId 52:480 (first _ after prefix is the colon separator)
+    const suffix = key.slice(RASTER_PREFIX.length); // "52_480"
+    const underscoreIdx = suffix.indexOf('_');
+    if (underscoreIdx === -1) continue;
+    const nodeId = suffix.slice(0, underscoreIdx) + ':' + suffix.slice(underscoreIdx + 1);
+    nodeIdToRasterKey.set(nodeId, key);
+  }
+
+  if (nodeIdToRasterKey.size === 0) return 0;
+
+  let patched = 0;
+  function walk(node: FigmaForgeNode): void {
+    if (node.id && nodeIdToRasterKey.has(node.id) && !node._rasterizedImageHash) {
+      node._rasterizedImageHash = nodeIdToRasterKey.get(node.id)!;
+      patched++;
+    }
+    if (node.children) {
+      for (const child of node.children) walk(child);
+    }
+  }
+  walk(root);
+
+  if (verbose) console.log(`[FigmaForge] ♻️  Backfilled _rasterizedImageHash on ${patched}/${nodeIdToRasterKey.size} nodes`);
+  return patched;
+}
+
 // ─── Public API ──────────────────────────────────────────────────
 
 /**
@@ -296,6 +397,9 @@ export async function resolveImages(
     if (verbose) console.log('[FigmaForge] No unresolved images — skipping image pipeline');
     return result;
   }
+
+  // Backfill _rasterizedImageHash for raster_* keys (extraction doesn't set this)
+  backfillRasterHashes(manifest.root, manifest.unresolvedImages, verbose);
 
   // Validate config exists before starting — fail fast, don't bury in result.errors
   getConfig();

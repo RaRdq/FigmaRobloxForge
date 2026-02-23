@@ -375,27 +375,27 @@ export function isEllipse(node: FigmaForgeNode): boolean {
 // ─── Fill Queries ────────────────────────────────────────────────
 
 export function hasVisibleFills(node: FigmaForgeNode): boolean {
-  return node.fills.some(f => f.visible && f.type !== 'IMAGE');
+  return (node.fills || []).some(f => f.visible && f.type !== 'IMAGE');
 }
 
 export function getPrimaryFillColor(node: FigmaForgeNode): FigmaColor {
   // Any gradient fill → return white so UIGradient colors render at full fidelity.
   // Without this, Roblox multiplies BackgroundColor3 × UIGradient → double-tinted/pastel.
-  const gradFill = node.fills.find(f => f.type?.startsWith('GRADIENT_') && f.visible);
+  const gradFill = (node.fills || []).find(f => f.type?.startsWith('GRADIENT_') && f.visible);
   if (gradFill) return { r: 1, g: 1, b: 1, a: 1 };
 
-  const solidFill = node.fills.find(f => f.type === 'SOLID' && f.visible);
+  const solidFill = (node.fills || []).find(f => f.type === 'SOLID' && f.visible);
   if (solidFill?.color) return solidFill.color;
 
   return { r: 1, g: 1, b: 1, a: 1 };
 }
 
 export function getGradientFill(node: FigmaForgeNode): FigmaFill | undefined {
-  return node.fills.find(f => f.type?.startsWith('GRADIENT_') && f.visible);
+  return (node.fills || []).find(f => f.type?.startsWith('GRADIENT_') && f.visible);
 }
 
 export function getPrimaryStroke(node: FigmaForgeNode): FigmaStroke | undefined {
-  return node.strokes.find(s => s.visible);
+  return (node.strokes || []).find(s => s.visible);
 }
 
 // ─── Opacity Composition ─────────────────────────────────────────
@@ -408,7 +408,7 @@ export function getPrimaryStroke(node: FigmaForgeNode): FigmaStroke | undefined 
  * Roblox: BackgroundTransparency = 1 - (fill.opacity * node.opacity)
  */
 export function computeBackgroundTransparency(node: FigmaForgeNode): number {
-  const primaryFill = node.fills.find(f => f.visible && f.type !== 'IMAGE');
+  const primaryFill = (node.fills || []).find(f => f.visible && f.type !== 'IMAGE');
   const fillOpacity = (primaryFill?.opacity ?? 1) * node.opacity;
   return round(1 - fillOpacity);
 }
