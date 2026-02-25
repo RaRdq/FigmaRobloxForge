@@ -126,7 +126,13 @@ const CACHE_PATH = path.join(__dirname, '.figmaforge-image-cache.json');
 function loadImageCache(): ImageCache {
   if (fs.existsSync(CACHE_PATH)) {
     try {
-      return JSON.parse(fs.readFileSync(CACHE_PATH, 'utf-8'));
+      const data = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf-8'));
+      if (data && typeof data === 'object') {
+        return {
+          version: data.version || '1.0.0',
+          entries: data.entries || {},
+        };
+      }
     } catch (err: any) {
       console.warn(`[FigmaForge] ⚠ Image cache corrupt, resetting: ${err.message}`);
     }
@@ -293,26 +299,19 @@ function applyResolvedId(node: FigmaForgeNode, imageHash: string, assetId: strin
  * Without this, `applyResolvedId` can never match uploaded assets to nodes.
  */
 function backfillRasterHashes(root: FigmaForgeNode, unresolvedImages: string[], verbose: boolean): number {
-  // Build nodeId → rasterKey lookup from unresolvedImages
   const RASTER_PREFIX = 'raster_';
-  const nodeIdToRasterKey = new Map<string, string>();
-  for (const key of unresolvedImages) {
-    if (!key.startsWith(RASTER_PREFIX)) continue;
-    // raster_52_480 → nodeId 52:480 (first _ after prefix is the colon separator)
-    const suffix = key.slice(RASTER_PREFIX.length); // "52_480"
-    const underscoreIdx = suffix.indexOf('_');
-    if (underscoreIdx === -1) continue;
-    const nodeId = suffix.slice(0, underscoreIdx) + ':' + suffix.slice(underscoreIdx + 1);
-    nodeIdToRasterKey.set(nodeId, key);
-  }
-
-  if (nodeIdToRasterKey.size === 0) return 0;
+  const unresolvedSet = new Set(unresolvedImages.filter(k => k.startsWith(RASTER_PREFIX)));
+  
+  if (unresolvedSet.size === 0) return 0;
 
   let patched = 0;
   function walk(node: FigmaForgeNode): void {
-    if (node.id && nodeIdToRasterKey.has(node.id) && !node._rasterizedImageHash) {
-      node._rasterizedImageHash = nodeIdToRasterKey.get(node.id)!;
-      patched++;
+    if (node.id && !node._rasterizedImageHash) {
+      const rasterKey = RASTER_PREFIX + node.id.replace(':', '_');
+      if (unresolvedSet.has(rasterKey)) {
+        node._rasterizedImageHash = rasterKey;
+        patched++;
+      }
     }
     if (node.children) {
       for (const child of node.children) walk(child);
@@ -320,7 +319,7 @@ function backfillRasterHashes(root: FigmaForgeNode, unresolvedImages: string[], 
   }
   walk(root);
 
-  if (verbose) console.log(`[FigmaForge] ♻️  Backfilled _rasterizedImageHash on ${patched}/${nodeIdToRasterKey.size} nodes`);
+  if (verbose) console.log(`[FigmaForge] ♻️  Backfilled _rasterizedImageHash on ${patched}/${unresolvedSet.size} nodes`);
   return patched;
 }
 

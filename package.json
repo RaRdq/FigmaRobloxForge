@@ -8,15 +8,25 @@
     "start": "ts-node figma-forge-cli.ts",
     "check": "tsc --noEmit"
   },
-  "keywords": ["figma", "roblox", "rbxmx", "ui", "converter", "design-to-code"],
+  "keywords": [
+    "figma",
+    "roblox",
+    "rbxmx",
+    "ui",
+    "converter",
+    "design-to-code"
+  ],
   "author": "RedRift",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0",
     "ts-node": "^10.9.0",
-    "@types/node": "^20.0.0"
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
   }
 }

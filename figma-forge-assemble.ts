@@ -16,7 +16,7 @@ import {
   mapAutoLayout, mapLayoutSizing, computeCanvasSize,
   isScrollContainer, isDynamicText, RuntimeConfig,
   sanitizeTextForRoblox, isTemplateNode, stripConventionSuffix, isScrollConvention,
-  computeBackgroundTransparency,
+  computeBackgroundTransparency, mapTextAutoResize,
 } from './figma-forge-shared';
 
 // ─── Constants ───────────────────────────────────────────────────
@@ -210,6 +210,7 @@ function emitNode(
   parentWidth: number = 0,
   parentHeight: number = 0,
 ): string {
+  if (!node) return '';
   if (node._isStrokeDuplicate) return '';
 
   const strategy = classifyNode(node, config);
@@ -294,7 +295,7 @@ function emitPngNode(
   }
 
   if (isRoot) {
-    lines.push(`<token name="ZIndexBehavior">1</token>`); // Sibling
+  lines.push(`<token name="ZIndexBehavior">1</token>`); // Sibling
   }
 
   // Rotation: Figma rotation → Roblox Rotation property (degrees)
@@ -335,7 +336,9 @@ function emitDynamicTextNode(
   const textColor = node.fills?.find(f => f.visible && f.type === 'SOLID')?.color
     ?? { r: 1, g: 1, b: 1, a: 1 };
 
-  const hAlignMap: Record<string, number> = { LEFT: 0, RIGHT: 1, CENTER: 2, JUSTIFIED: 0 };
+  // Roblox TextXAlignment tokens: Left=0, Right=1, Center=2
+  // Roblox TextYAlignment tokens: Top=0, Center=1, Bottom=2
+  const hAlignMap: Record<string, number> = { LEFT: 0, CENTER: 2, RIGHT: 1, JUSTIFIED: 0 };
   const vAlignMap: Record<string, number> = { TOP: 0, CENTER: 1, BOTTOM: 2 };
 
   // ── GENERIC FIX: Dynamic text ($prefix) uses parent-relative width + AutomaticSize ──
@@ -343,12 +346,32 @@ function emitDynamicTextNode(
   // so we use parent-fill width and let Roblox auto-size the height.
   const isDynamic = name.startsWith(config.dynamicPrefix);
 
-  const [posXml, baseSizeXml, anchorXml] = emitGeometry(node, false, parentHasAutoLayout, parentWidth, parentHeight, Math.round(node.width), Math.round(node.height));
+  const [basePosXml, baseSizeXml, baseAnchorXml] = emitGeometry(node, false, parentHasAutoLayout, parentWidth, parentHeight, Math.round(node.width), Math.round(node.height));
   
   // Size override: dynamic text inside auto-layout forces Scale X = 1
   const sizeXml = (isDynamic && parentHasAutoLayout)
     ? `<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>0</YS><YO>${Math.round(node.height)}</YO></UDim2>`
     : baseSizeXml;
+
+  // OVERRIDE AnchorPoint and Position based on text alignment for non-autolayout containers!
+  // If we don't do this, center-aligned text will grow strictly to the right from X=0.
+  let posXml = basePosXml;
+  let anchorXml = baseAnchorXml;
+  if (isDynamic && !parentHasAutoLayout) {
+    const hAlign = ts?.textAlignHorizontal ?? node.textAlignHorizontal ?? 'LEFT';
+    const vAlign = ts?.textAlignVertical ?? node.textAlignVertical ?? 'TOP';
+    
+    let ax = 0, px = Math.round(node.x);
+    if (hAlign === 'CENTER') { ax = 0.5; px = Math.round(node.x + (node.width / 2)); }
+    else if (hAlign === 'RIGHT') { ax = 1.0; px = Math.round(node.x + node.width); }
+
+    let ay = 0, py = Math.round(node.y);
+    if (vAlign === 'CENTER') { ay = 0.5; py = Math.round(node.y + (node.height / 2)); }
+    else if (vAlign === 'BOTTOM') { ay = 1.0; py = Math.round(node.y + node.height); }
+
+    posXml = `<UDim2 name="Position"><XS>0</XS><XO>${px}</XO><YS>0</YS><YO>${py}</YO></UDim2>`;
+    anchorXml = (ax !== 0 || ay !== 0) ? `<Vector2 name="AnchorPoint"><X>${ax}</X><Y>${ay}</Y></Vector2>` : '';
+  }
 
   const lines: string[] = [
     `<Item class="TextLabel" referent="${ref}">`,
@@ -366,15 +389,22 @@ function emitDynamicTextNode(
     `<Font name="FontFace"><Family><url>${fontFamily}</url></Family><Weight>${fontWeight}</Weight><Style>Normal</Style></Font>`,
     `<token name="TextXAlignment">${hAlignMap[ts?.textAlignHorizontal ?? node.textAlignHorizontal ?? 'LEFT'] ?? 0}</token>`,
     `<token name="TextYAlignment">${vAlignMap[ts?.textAlignVertical ?? node.textAlignVertical ?? 'TOP'] ?? 0}</token>`,
-    `<bool name="TextWrapped">${isDynamic ? 'true' : 'false'}</bool>`,
   ];
 
   if (anchorXml) lines.push(anchorXml);
 
-  // Dynamic text gets AutomaticSize=Y so the label grows vertically if text wraps
-  if (isDynamic) {
-    lines.push(`<token name="AutomaticSize">2</token>`);  // Y
+  // Dynamic text must wrap to expand vertically if needed. Unless specifically WIDTH_AND_HEIGHT
+  const resizeEnum = node.textAutoResize ?? 'HEIGHT';
+  let autoSizeToken = 2; // Y
+  let textWrapped = true;
+  
+  if (resizeEnum === 'WIDTH_AND_HEIGHT') {
+    autoSizeToken = 3; // XY
+    textWrapped = false;
   }
+  
+  lines.push(`<bool name="TextWrapped">${textWrapped}</bool>`);
+  lines.push(`<token name="AutomaticSize">${mapTextAutoResize(resizeEnum).automaticSizeToken}</token>`);
 
   // Text transparency from node opacity
   if (node.opacity < 1) {
@@ -607,7 +637,7 @@ function emitContainerNode(
     lines.push(`<UDim name="Padding"><S>0</S><O>${al.padding || 0}</O></UDim>`);
     lines.push(`<token name="HorizontalAlignment">${al.horizontalAlignment === 'Center' ? 1 : (al.horizontalAlignment === 'Right' ? 2 : 0)}</token>`);
     lines.push(`<token name="VerticalAlignment">${al.verticalAlignment === 'Center' ? 1 : (al.verticalAlignment === 'Bottom' ? 2 : 0)}</token>`);
-    lines.push(`<token name="SortOrder">2</token>`);
+    lines.push(`<token name="SortOrder">2</token>`); // LayoutOrder
     if (al.wraps) {
       lines.push(`<bool name="Wraps">true</bool>`);
     }
@@ -689,8 +719,13 @@ export function assembleRbxmx(
   config: RuntimeConfig,
 ): string {
   refCounter = 0;
-  const body = emitNode(manifest.root, config, 1, true);
-  const screenGuiRef = nextRef();
+  if (!manifest || !manifest.root) {
+    throw new Error('Invalid manifest: root node is missing.');
+  }
+
+    const body = emitNode(manifest.root, config, 1, true);
+    // DIAGNOSTIC_FIX_VERIFIED
+    const screenGuiRef = nextRef();
   const screenGuiName = manifest.root.name || 'FigmaForgeUI';
 
   // ScreenGui: Enabled=true (Lua controls visibility via rootFrame.Visible),

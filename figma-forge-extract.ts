@@ -356,6 +356,7 @@ async function main() {
       // Any visible fill/stroke → _isHybrid → _BG ImageLabel from rasterized PNG
       ir._isHybrid = hasVisualBackground;
       if (hasVisualBackground && 'exportAsync' in node) {
+        ir._rasterizedImageHash = 'raster_' + node.id.replace(/:/g, '_');
         rasterQueue.push({ irNode: ir, figmaNode: node });
         console.log('[FigmaForge] Container+BG (will rasterize): ' + node.name + ' (' + node.id + ')');
       } else {
@@ -365,6 +366,7 @@ async function main() {
       // Leaf visual (childless, no tag) → export as single PNG
       ir._isFlattened = true;
       if ('exportAsync' in node) {
+        ir._rasterizedImageHash = 'raster_' + node.id.replace(/:/g, '_');
         rasterQueue.push({ irNode: ir, figmaNode: node });
         console.log('[FigmaForge] PNG slice: ' + node.name + ' (' + node.id + ')');
       }
@@ -445,28 +447,35 @@ async function main() {
         const hiddenNodes = [];
         if (irNode._isHybrid) {
           // Hide ALL children so only the background fill/stroke is baked into the PNG.
-          // Children are preserved in the hierarchy and exported as their own separate PNGs.
+          // Children must be HIDDEN visually but NOT by .visible = false
+          // because child .visible = false often triggers Auto Layout collapses in Figma
+          // which results in wrong container dimensions for the rasterized background.
+          // By using .opacity = 0, we preserve the layout tree while ensuring the visuals
+          // are not "baked in" to the parent's PNG.
+          const originalOpacities = new Map();
           if ('children' in figmaNode && figmaNode.children) {
             for (const childNode of figmaNode.children) {
               if (childNode.visible) {
-                childNode.visible = false;
-                hiddenNodes.push(childNode);
+                 originalOpacities.set(childNode, childNode.opacity);
+                 childNode.opacity = 0;
+                 hiddenNodes.push(childNode);
               }
             }
           }
-          console.log('[FigmaForge] Hidden ' + hiddenNodes.length + ' children for hybrid: ' + figmaNode.name);
+          console.log('[FigmaForge] Temporarily set opacity=0 for ' + hiddenNodes.length + ' children for hybrid: ' + figmaNode.name);
           // CRITICAL: Figma's render pipeline needs a tick to process visibility changes
           // before exportAsync captures the frame. Without this, children are still
           // baked into the exported PNG.
-          await new Promise(function(r) { setTimeout(r, 100); });
+          // Wait for FIGMA to process the visual change before capturing.
+          // Increased from 100ms to 250ms for more reliability in complex files.
+          await new Promise((resolve) => setTimeout(resolve, 250));
         }
 
         const pngBytes = await figmaNode.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
-        
-        // Restore visibility
-        for (const n of hiddenNodes) {
-          n.visible = true;
-        }
+                // Restore opacities
+          for (const node of hiddenNodes) {
+            node.opacity = originalOpacities.get(node) ?? 1;
+          }
 
         const hash = irNode._rasterizedImageHash;
         exportedImages[hash] = uint8ToBase64(pngBytes);

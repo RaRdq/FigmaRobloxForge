@@ -123,7 +123,7 @@ export async function processManifestAsync(
   options?: ProcessOptions,
 ): Promise<string> {
   let manifestData = JSON.parse(jsonString);
-  if (manifestData.success === true && manifestData.result) {
+  if (manifestData.result) {
     manifestData = manifestData.result;
   }
   const manifest: FigmaForgeManifest = manifestData;
@@ -151,7 +151,7 @@ export function processManifestSync(
   options?: ProcessOptions,
 ): string {
   let manifestData = JSON.parse(jsonString);
-  if (manifestData.success === true && manifestData.result) {
+  if (manifestData.result) {
     manifestData = manifestData.result;
   }
   const manifest: FigmaForgeManifest = manifestData;
@@ -246,6 +246,14 @@ async function main(): Promise<void> {
   // Catches known Rojo crash patterns BEFORE writing the file
   const rojoErrors: string[] = [];
 
+  // ── CRITICAL: <token> tags MUST contain numeric values, never strings ──
+  // Rojo fails with "invalid digit found in string" if tokens contain "None", "XY", etc.
+  const stringTokenPattern = /<token[^>]*>([A-Za-z]+)<\/token>/g;
+  let tokenMatch;
+  while ((tokenMatch = stringTokenPattern.exec(rbxmx)) !== null) {
+    rojoErrors.push(`❌ <token> contains string "${tokenMatch[1]}" instead of numeric enum — at char ${tokenMatch.index}`);
+  }
+
   // Properties that Rojo requires as <int>, NOT <token>
   // Source: Rojo crashes with "unexpected property type" for these
   const ROJO_INT_PROPERTIES = [
@@ -278,7 +286,23 @@ async function main(): Promise<void> {
   if (rojoErrors.length > 0) {
     throw new Error(`[FigmaForge] ROJO SAFETY CHECK FAILED:\n${rojoErrors.join('\n')}`);
   }
-  if (args.verbose) console.log(`🛡️  Rojo safety check passed (${openItems} items, ${referents.length} referents, 0 issues)`);
+
+  // ── Image asset completeness check ──
+  // Fail-fast if ImageLabels exist but have no Image content (e.g. --resolve-images was forgotten)
+  const imageLabelCount = (rbxmx.match(/class="ImageLabel"/g) || []).length;
+  const assetIdCount = (rbxmx.match(/rbxassetid:\/\/\d+/g) || []).length;
+  if (imageLabelCount > 0 && assetIdCount === 0) {
+    throw new Error(
+      `[FigmaForge] IMAGE ASSET CHECK FAILED: ${imageLabelCount} ImageLabels but 0 rbxassetid:// URLs!\n` +
+      `Did you forget --resolve-images? Re-run with: --resolve-images`
+    );
+  }
+  // Warn if some ImageLabels may be missing images (heuristic: expect at least 1 asset per 2 ImageLabels)
+  if (imageLabelCount > 2 && assetIdCount < imageLabelCount / 2) {
+    console.warn(`⚠️  WARNING: ${imageLabelCount} ImageLabels but only ${assetIdCount} asset IDs — some images may be missing`);
+  }
+
+  if (args.verbose) console.log(`🛡️  Rojo safety check passed (${openItems} items, ${referents.length} referents, ${assetIdCount} assets, 0 issues)`);
 
   const outputPath = args.output || inputPath.replace(/\.json$/, '.rbxmx');
   fs.writeFileSync(outputPath, rbxmx);
@@ -315,7 +339,7 @@ async function main(): Promise<void> {
 
 if (require.main === module) {
   main().catch(err => {
-    console.error(`Fatal: ${err.message}`);
+    console.error(`Fatal:`, err);
     process.exit(1);
   });
 }

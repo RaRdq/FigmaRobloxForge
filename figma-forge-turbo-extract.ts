@@ -131,6 +131,38 @@ async function main() {
   async function processNode(node) {
     if (TARGET_HASHES.size === 0) return;
     
+    const rasterKey = 'raster_' + node.id.replace(/:/g, '_');
+    if (TARGET_HASHES.has(rasterKey)) {
+      TARGET_HASHES.delete(rasterKey);
+      try {
+        // --- PREVENT BAKED CHILDREN: Hide ALL children before rasterizing hybrid _BG ---
+        // When rasterizing a container's background, ALL children must be hidden so only
+        // the fill/stroke is captured. Children (text, icons, overlays like RewardSpin)
+        // are emitted as separate native Roblox elements by the assembler.
+        // Uses opacity=0 (not visible=false) to preserve AutoLayout dimensions.
+        const hiddenNodes = [];
+        if ('children' in node && node.children) {
+          for (const child of node.children) {
+            if (child.visible !== false) {
+              hiddenNodes.push({ node: child, oldOpacity: child.opacity });
+              child.opacity = 0;
+            }
+          }
+        }
+        
+        const bytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
+        
+        // --- RESTORE VISIBILITY ---
+        for (const item of hiddenNodes) {
+           item.node.opacity = item.oldOpacity;
+        }
+        
+        exportedImages[rasterKey] = uint8ToBase64(bytes);
+      } catch(e) {
+        notFound.push(rasterKey + ':err:' + String(e));
+      }
+    }
+
     const fills = node.fills;
     if (fills && fills !== figma.mixed) {
       for (const fill of fills) {

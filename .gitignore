@@ -16,50 +16,76 @@ dist/
 *.swp
 *.swo
 
-# Image pipeline cache
-.figmaforge-image-cache.json
-.figmaforge-tmp/
+# OS
+.DS_Store
+Thumbs.db
 
-# Pipeline temp artifacts (game-specific)
-exports/
-output/
+# Lock files (generated)
+package-lock.json
+
+# ── Pipeline temp artifacts ──────────────────────
+# Catch-all for generated text/log dumps
+*.txt
+exec_script.*
+*_output.*
+debug_out.*
+captured.*
+encoded.*
+
+# JSON blobs (manifests, batches, exports, payloads)
 manifest*.json
-_exported_images*.json
+batch_result_*.json
+batch_script_*.js
+*_exported_images*.json
 _imgs_*.json
-_exec_script.txt
-_extract_code.js
-_*.txt
-extraction_*.js
-extraction_*.json
-render_bounds_check.json
-audit_nodes.json
-final_export.*
-export_chunk_*.js
-export_script_*.js
 exported_images_*.json
 exported-images.json
+output.json
+payload.json
+render_bounds_check.json
+audit_nodes.json
+upgrade-modal-*.json
+*.bindings.json
+
+# Extraction & patch scripts (generated JS)
+extraction_*.js
+extraction_*.json
+extract_tree.js
+exec_payload.js
+export_chunk_*.js
+export_script_*.js
 temp-*.js
 temp_*.js
 img_script.js
 execute_mcp.js
-*.rbxmx
-upgrade-modal-*.json
-*.bindings.json
-output.json
-payload.json
-captured.txt
-encoded.txt
-cors_server.py
 patch_*.js
 pull_hashes.js
 run_extraction_ws.js
-get-script.ts
+batch_merge.js
 
-# Game-specific temp dirs
+# Generated one-off scripts
+get-script.ts
+generate_script.ts
+merge_manifests.ts
+resolve_decals.*
+*.mjs
+
+# Roblox output
+*.rbxmx
+final_export.*
+
+# Pipeline cache
+.figmaforge-image-cache.json
+.figmaforge-tmp/
+
+# Temp / generated dirs
 temp/
 images/
+exports/
+output/
 docs/
 LegEggTemp/
+manifests/
 
 # Generated test/e2e
 e2e-*.luau
@@ -69,12 +95,8 @@ test-manifest.json
 run-e2e-*.ts
 
 # Dead files
-generate_script.ts
 HANDOVER.md
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Lock files (generated)
-package-lock.json
+# Python helpers
+cors_server.py
+*.pyc
