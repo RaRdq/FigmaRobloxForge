@@ -136,16 +136,17 @@ async function main() {
       TARGET_HASHES.delete(rasterKey);
       try {
         // --- PREVENT BAKED CHILDREN: Hide ALL children before rasterizing hybrid _BG ---
-        // When rasterizing a container's background, ALL children must be hidden so only
-        // the fill/stroke is captured. Children (text, icons, overlays like RewardSpin)
-        // are emitted as separate native Roblox elements by the assembler.
-        // Uses opacity=0 (not visible=false) to preserve AutoLayout dimensions.
+        // When rasterizing a container's background, ALL children must be INVISIBLE so only
+        // the fill/stroke/effects of the container itself are captured.
+        // CRITICAL: Must use visible=false, NOT opacity=0!
+        // opacity=0 still renders shapes/strokes in Figma's exportAsync output.
+        // visible=false truly removes the node from the render pass.
         const hiddenNodes = [];
         if ('children' in node && node.children) {
           for (const child of node.children) {
             if (child.visible !== false) {
-              hiddenNodes.push({ node: child, oldOpacity: child.opacity });
-              child.opacity = 0;
+              hiddenNodes.push({ node: child, oldVisible: child.visible });
+              child.visible = false;
             }
           }
         }
@@ -154,7 +155,7 @@ async function main() {
         
         // --- RESTORE VISIBILITY ---
         for (const item of hiddenNodes) {
-           item.node.opacity = item.oldOpacity;
+           item.node.visible = item.oldVisible;
         }
         
         exportedImages[rasterKey] = uint8ToBase64(bytes);

@@ -274,12 +274,18 @@ function collectImageNodes(node: FigmaForgeNode, results: FigmaForgeNode[]): voi
   }
 }
 
-/** Apply resolved IDs to all nodes matching an imageHash or rasterizedImageHash */
+/** Apply resolved IDs to all nodes matching an imageHash, rasterizedImageHash, or _imageKey */
 function applyResolvedId(node: FigmaForgeNode, imageHash: string, assetId: string): void {
   const hasMatch = (node.fills ?? []).some(f => f.type === 'IMAGE' && f.visible && f.imageHash === imageHash);
   const hasRasterMatch = node._rasterizedImageHash === imageHash;
-  if (hasMatch || hasRasterMatch) {
+  // Turbo extract sets _imageKey instead of _rasterizedImageHash
+  const hasImageKeyMatch = (node as any)._imageKey === imageHash;
+  if (hasMatch || hasRasterMatch || hasImageKeyMatch) {
     node._resolvedImageId = `rbxassetid://${assetId}`;
+    // Also backfill _rasterizedImageHash so classifyNode sees it as rasterized
+    if (!node._rasterizedImageHash && hasImageKeyMatch) {
+      node._rasterizedImageHash = imageHash;
+    }
   }
   if (node.children) {
     for (const child of node.children) {
@@ -306,9 +312,20 @@ function backfillRasterHashes(root: FigmaForgeNode, unresolvedImages: string[], 
 
   let patched = 0;
   function walk(node: FigmaForgeNode): void {
-    if (node.id && !node._rasterizedImageHash) {
-      const rasterKey = RASTER_PREFIX + node.id.replace(':', '_');
-      if (unresolvedSet.has(rasterKey)) {
+    if (!node._rasterizedImageHash) {
+      // Try matching by node.id (standard extract) or _imageKey (turbo extract)
+      let rasterKey = '';
+      if (node.id) {
+        rasterKey = RASTER_PREFIX + node.id.replace(':', '_');
+      }
+      if (!rasterKey || !unresolvedSet.has(rasterKey)) {
+        // Turbo extract sets _imageKey directly on nodes
+        const imageKey = (node as any)._imageKey;
+        if (imageKey && unresolvedSet.has(imageKey)) {
+          rasterKey = imageKey;
+        }
+      }
+      if (rasterKey && unresolvedSet.has(rasterKey)) {
         node._rasterizedImageHash = rasterKey;
         patched++;
       }

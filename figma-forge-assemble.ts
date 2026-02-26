@@ -330,11 +330,17 @@ function emitDynamicTextNode(
       ? `${config.dynamicPrefix}${node.name}`
       : node.name;
 
-  const fontFamily = getFontFamily(ts?.fontFamily ?? node.fontFamily ?? 'Inter');
-  const rawWeight = Number(ts?.fontWeight ?? node.fontWeight ?? 400);
-  const fontWeight = Number.isFinite(rawWeight) ? Math.round(rawWeight / 100) * 100 : 400;
-  const textColor = node.fills?.find(f => f.visible && f.type === 'SOLID')?.color
-    ?? { r: 1, g: 1, b: 1, a: 1 };
+  // Support both standard extract (fontFamily/fontSize/fontWeight) and turbo extract (family/size/style) formats
+  const fontFamily = getFontFamily(ts?.fontFamily ?? ts?.family ?? node.fontFamily ?? 'Inter');
+  // Map Figma font style names to numeric weights
+  const styleToWeight: Record<string, number> = { Thin: 100, ExtraLight: 200, Light: 300, Regular: 400, Medium: 500, SemiBold: 600, Bold: 700, ExtraBold: 800, Black: 900 };
+  const rawWeight = ts?.fontWeight ?? (ts?.style ? styleToWeight[ts.style] : undefined) ?? node.fontWeight ?? 400;
+  const fontWeight = Number.isFinite(Number(rawWeight)) ? Math.round(Number(rawWeight) / 100) * 100 : 400;
+  // Text color: support turbo extract fillR/G/B on textStyle, and standard fills array
+  const textColor = (ts?.fillR !== undefined)
+    ? { r: ts.fillR, g: ts.fillG ?? 0, b: ts.fillB ?? 0, a: ts.fillOpacity ?? 1 }
+    : node.fills?.find(f => f.visible && f.type === 'SOLID')?.color
+      ?? { r: 1, g: 1, b: 1, a: 1 };
 
   // Roblox TextXAlignment tokens: Left=0, Right=1, Center=2
   // Roblox TextYAlignment tokens: Top=0, Center=1, Bottom=2
@@ -358,7 +364,7 @@ function emitDynamicTextNode(
   let posXml = basePosXml;
   let anchorXml = baseAnchorXml;
   if (isDynamic && !parentHasAutoLayout) {
-    const hAlign = ts?.textAlignHorizontal ?? node.textAlignHorizontal ?? 'LEFT';
+    const hAlign = ts?.textAlignHorizontal ?? ts?.textAlign ?? node.textAlignHorizontal ?? 'LEFT';
     const vAlign = ts?.textAlignVertical ?? node.textAlignVertical ?? 'TOP';
     
     let ax = 0, px = Math.round(node.x);
@@ -384,10 +390,10 @@ function emitDynamicTextNode(
     posXml,
     sizeXml,
     `<string name="Text">${escapeXmlAttr(sanitizeTextForRoblox(node.characters ?? ''))}</string>`,
-    `<float name="TextSize">${ts?.fontSize ?? node.fontSize ?? 14}</float>`,
+    `<float name="TextSize">${ts?.fontSize ?? ts?.size ?? node.fontSize ?? 14}</float>`,
     colorXml('TextColor3', textColor),
     `<Font name="FontFace"><Family><url>${fontFamily}</url></Family><Weight>${fontWeight}</Weight><Style>Normal</Style></Font>`,
-    `<token name="TextXAlignment">${hAlignMap[ts?.textAlignHorizontal ?? node.textAlignHorizontal ?? 'LEFT'] ?? 0}</token>`,
+    `<token name="TextXAlignment">${hAlignMap[ts?.textAlignHorizontal ?? ts?.textAlign ?? node.textAlignHorizontal ?? 'LEFT'] ?? 0}</token>`,
     `<token name="TextYAlignment">${vAlignMap[ts?.textAlignVertical ?? node.textAlignVertical ?? 'TOP'] ?? 0}</token>`,
   ];
 

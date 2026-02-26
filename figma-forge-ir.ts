@@ -69,6 +69,17 @@ export interface FigmaTextStyle {
   textAlignVertical: 'TOP' | 'CENTER' | 'BOTTOM';
   textDecoration: 'NONE' | 'UNDERLINE' | 'STRIKETHROUGH';
   textCase: 'ORIGINAL' | 'UPPER' | 'LOWER' | 'TITLE';
+  // Turbo extract format (alternative property names)
+  family?: string;        // maps to fontFamily
+  style?: string;         // "Bold"/"Black"/"Regular" → maps to fontWeight
+  size?: number;          // maps to fontSize
+  textAlign?: string;     // "CENTER"/"LEFT" → maps to textAlignHorizontal
+  fillR?: number;         // text color red channel 0-1
+  fillG?: number;         // text color green channel 0-1
+  fillB?: number;         // text color blue channel 0-1
+  fillOpacity?: number;   // text color opacity 0-1
+  strokeWeight?: number;  // text stroke weight
+  lineHeightUnit?: string;
 }
 
 // ─── Layout ──────────────────────────────────────────────────────
