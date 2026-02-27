@@ -1,102 +1,57 @@
+# Build output
+dist/
+
 # Dependencies
 node_modules/
 
-# Build output
-dist/
-*.js
-*.js.map
-*.d.ts
-!figma-forge-ir.ts
+# === PROJECT-SPECIFIC DATA — NEVER commit to FigmaForge repo ===
+# All turbo extract output goes to ../../temp/figmaforge/
+manifests/
+docs/
+*.bindings.json
+*.manifest.json
+
+# Temporary/ephemeral files from extraction pipeline
+extract_tree.js
+batch_script_*.js
+batch_result_*.json
+batch_merge.js
+save_batch_*.js
+save_manifest*.js
+save_tree.js
+shop_batch_*.js
+shop_batch_result_*.json
+
+# Legacy scripts that should not reappear
+merge_manifests.ts
+get-script.ts
+script.js
+runner.js
+cors_server.py
+resolve_decals.*
+execute_*.js
+exec_payload.js
+run_extraction_ws.js
+extraction_*.js
+clean_tags*.js
+pull_hashes.js
+
+# Payload/manifest junk
+manifest_*.json
+payload*.json
+inject.json
+mcp.json
+raw_output.json
+all_hashes.json
+exported-images.json
+
+# Image artifacts
+*.png
+!README.md
+
+# Cache files (runtime only, regenerated)
+.figmaforge-image-cache.json
+.decal-image-mapping.json
 
 # Environment
 .env
-
-# IDE
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Lock files (generated)
-package-lock.json
-
-# ── Pipeline temp artifacts ──────────────────────
-# Catch-all for generated text/log dumps
-*.txt
-exec_script.*
-*_output.*
-debug_out.*
-captured.*
-encoded.*
-
-# JSON blobs (manifests, batches, exports, payloads)
-manifest*.json
-batch_result_*.json
-batch_script_*.js
-*_exported_images*.json
-_imgs_*.json
-exported_images_*.json
-exported-images.json
-output.json
-payload.json
-render_bounds_check.json
-audit_nodes.json
-upgrade-modal-*.json
-*.bindings.json
-
-# Extraction & patch scripts (generated JS)
-extraction_*.js
-extraction_*.json
-extract_tree.js
-exec_payload.js
-export_chunk_*.js
-export_script_*.js
-temp-*.js
-temp_*.js
-img_script.js
-execute_mcp.js
-patch_*.js
-pull_hashes.js
-run_extraction_ws.js
-batch_merge.js
-
-# Generated one-off scripts
-get-script.ts
-generate_script.ts
-merge_manifests.ts
-resolve_decals.*
-*.mjs
-
-# Roblox output
-*.rbxmx
-final_export.*
-
-# Pipeline cache
-.figmaforge-image-cache.json
-.figmaforge-tmp/
-
-# Temp / generated dirs
-temp/
-images/
-exports/
-output/
-docs/
-LegEggTemp/
-manifests/
-
-# Generated test/e2e
-e2e-*.luau
-e2e-*.json
-test-output.*
-test-manifest.json
-run-e2e-*.ts
-
-# Dead files
-HANDOVER.md
-
-# Python helpers
-cors_server.py
-*.pyc

@@ -2,36 +2,39 @@
 
 ## Auto-Fixed (Generic for All Games)
 
-These are handled automatically by the assembler:
-
-| Issue | Fix | Since |
+| Issue | Fix | Details |
 |---|---|---|
-| **Dynamic text clipping** | `$`-prefixed TextLabels get `AutomaticSize=Y`, `TextWrapped=true`, and parent-fill width when inside auto-layout | v2.1 |
-| **Child overflow warnings** | Console warnings when children have negative positions or exceed parent bounds | v2.1 |
-| **Interactive overlays** | Containers matching `Btn`/`Button` patterns auto-get invisible `TextButton` overlays for click detection | v2.0 |
-| **Rojo safety validation** | Pre-write check catches `<token>` where `<int>` is needed, duplicate referents, XML malformation | v2.0 |
-| **Responsive scaling** | Figma Constraints (e.g., Center, Right, Scale) auto-translated to Roblox `UDim2` Scale and `AnchorPoint` | v2.2 |
-| **Scrolling frames** | Containers with Figma "Overflow" set to Horizontal/Vertical/Both automatically emit as `ScrollingFrame` | v2.2 |
+| **Root frame bg** | `BackgroundTransparency=1` forced on root (Figma section fills discarded) | `emitContainerNode()` |
+| **Dynamic text clipping** | `$`-prefixed TextLabels get `AutomaticSize=Y`, `TextWrapped=true`, parent-fill width in auto-layout | `emitDynamicTextNode()` |
+| **Interactive overlays** | Containers matching `Btn`/`Button`/`close` auto-get `_Interact` TextButton (invisible, `AutoButtonColor=false`) | `emitInteractiveOverlay()` |
+| **[Flatten] + interactive** | Baked PNG buttons also get `_Interact` overlay auto-injected | `emitPngNode()` |
+| **Responsive scaling** | Figma Constraints (Center, Right, Scale, Stretch) → Roblox `UDim2` Scale + `AnchorPoint` | `emitGeometry()` |
+| **Scrolling frames** | Figma Overflow / `[Scroll]` / `@scroll` → `ScrollingFrame` with computed `CanvasSize` | `isScrollContainer()` |
+| **Solid fill optimization** | Single solid fills → `BackgroundColor3` (no PNG needed) | `_solidFill` in extract |
+| **Overflow promotion** | Interactive children exceeding clipped parent bounds → promoted as siblings | `emitContainerNode()` |
+| **HUG text centering** | HUG text in centered auto-layout → forced `TextXAlignment=Center` | `emitDynamicTextNode()` |
+| **[Flatten] tag stripping** | `[Flatten]`/`[Raster]`/`[Flattened]` stripped from output names | Post-process step |
 
 ## Cannot Auto-Fix (Designer Must Address in Figma)
 
-These require manual Figma layer adjustments before export:
-
 ### 1. Decorative Overflow vs Misplacement
-**Problem**: Figma allows child elements to intentionally overflow their parent (e.g., an icon bleeding past a card edge for visual effect). FigmaForge cannot distinguish this from genuine misplacement.
-
-**Recommendation**: 
-- Use `ClipsDescendants=true` on the Figma frame if overflow is NOT desired (enable "Clip content" in Figma)
-- For intentional decorative overflow, ensure the parent frame is large enough to contain all children, or accept the console warning
+Figma allows intentional child overflow. FigmaForge warns but can't distinguish from mistakes.
+- Enable "Clip content" in Figma if overflow is NOT desired
+- For intentional overflow: accept warning or ensure parent is large enough
 
 ### 2. Font Substitution
-**Problem**: Figma fonts don't always map 1:1 to Roblox fonts. Custom fonts (e.g., "Luckiest Guy") are mapped via a lookup table; unmapped fonts fall back to `BuilderSans`.
+Figma fonts don't map 1:1 to Roblox. Unmapped fonts fall back to `BuilderSans`.
+See `FONT_MAP` in `figma-forge-shared.ts` (40+ mappings).
 
-**Current mapping**: See `getFontFamily()` in `figma-forge-assemble.ts`
+### 3. Complex Gradients & Effects
+Roblox `UIGradient` only supports linear gradients. Radial/angular/diamond gradients trigger automatic PNG rasterization via `_isHybrid` → `_BG` ImageLabel. Trade-off: pixel-perfect but not scalable.
 
-### 4. Complex Gradients & Effects
-**Problem**: Figma supports linear, radial, angular, and diamond gradients. Roblox `UIGradient` only supports linear gradients. Complex gradients, multi-shadow stacks, and advanced blending modes are handled by rasterizing the entire visual as a PNG.
+### 4. Mixed Font Properties (Symbol Serialization)
+Figma returns `figma.mixed` (a Symbol) for text properties when multiple styles exist in one text node (e.g., bold + regular). The extract script must guard ALL font properties with `!== figma.mixed` checks. Unguarded Symbols cause `Cannot unwrap symbol` errors in `postMessage`.
 
-**Trade-off**: Rasterized visuals are pixel-perfect but not scalable. For responsive UIs, keep gradients simple (linear) or use solid colors.
+## Pipeline Notes
 
-
+- **Output directory**: Turbo extract artifacts go to `../../temp/figmaforge/` (never in FigmaForge source dir)
+- **Image upload**: Must use `assetType: 'Image'` (NOT `Decal`) — Decals limit to 420×420 with compression
+- **Image cache**: `.figmaforge-image-cache.json` maps hashes → `rbxassetid://` URLs. Delete if images fail to load.
+- **Rojo sync**: After generating `.rbxmx`, Rojo auto-syncs. If stale, destroy instance in Studio then touch the file.

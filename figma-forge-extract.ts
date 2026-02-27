@@ -157,10 +157,10 @@ async function main() {
         ? (node.lineHeight.unit === 'AUTO' ? 'AUTO' : node.lineHeight.value)
         : 'AUTO';
       style.letterSpacing = node.letterSpacing && node.letterSpacing !== figma.mixed ? node.letterSpacing.value : 0;
-      style.textAlignHorizontal = node.textAlignHorizontal || 'LEFT';
-      style.textAlignVertical = node.textAlignVertical || 'TOP';
-      style.textDecoration = node.textDecoration && node.textDecoration !== figma.mixed ? node.textDecoration : 'NONE';
-      style.textCase = node.textCase && node.textCase !== figma.mixed ? node.textCase : 'ORIGINAL';
+      style.textAlignHorizontal = safeMixed(node.textAlignHorizontal, 'LEFT');
+      style.textAlignVertical = safeMixed(node.textAlignVertical, 'TOP');
+      style.textDecoration = safeMixed(node.textDecoration, 'NONE');
+      style.textCase = safeMixed(node.textCase, 'ORIGINAL');
     } catch (e) {
       // Fallbacks for mixed styles
       style.fontFamily = 'Inter';
@@ -214,6 +214,14 @@ async function main() {
     return 0;
   }
 
+  // Guard: Figma returns figma.mixed (a Symbol) for properties with mixed values.
+  // Symbols crash postMessage serialization with 'Cannot unwrap symbol'.
+  // This helper returns the fallback for any Symbol/undefined/null value.
+  function safeMixed(val, fallback) {
+    if (val === undefined || val === null || typeof val === 'symbol') return fallback;
+    return val;
+  }
+
   function serializeNode(node) {
     stats.totalNodes++;
 
@@ -229,14 +237,14 @@ async function main() {
       rotation: 'rotation' in node ? Math.round(node.rotation * 100) / 100 : 0,
       cornerRadius: getCornerRadius(node),
       constraints: 'constraints' in node ? node.constraints : undefined,
-      overflowDirection: 'overflowDirection' in node ? node.overflowDirection : 'NONE',
+      overflowDirection: 'overflowDirection' in node ? safeMixed(node.overflowDirection, 'NONE') : 'NONE',
       fills: [],
       strokes: [],
       strokeWeight: 0,
       strokeAlign: 'INSIDE',
       effects: [],
       opacity: 'opacity' in node ? node.opacity : 1,
-      blendMode: 'blendMode' in node ? node.blendMode : 'NORMAL',
+      blendMode: 'blendMode' in node ? safeMixed(node.blendMode, 'NORMAL') : 'NORMAL',
       clipsContent: 'clipsDescendants' in node ? node.clipsDescendants : ('clipsContent' in node ? node.clipsContent : false),
       reactions: [],
       children: [],
@@ -445,37 +453,70 @@ async function main() {
     for (const { irNode, figmaNode } of rasterQueue) {
       try {
         const hiddenNodes = [];
+        let exportTarget = figmaNode;
+        let cloneToCleanup = null;
         if (irNode._isHybrid) {
-          // Hide ALL children so only the background fill/stroke is baked into the PNG.
-          // Children must be HIDDEN visually but NOT by .visible = false
-          // because child .visible = false often triggers Auto Layout collapses in Figma
-          // which results in wrong container dimensions for the rasterized background.
-          // By using .opacity = 0, we preserve the layout tree while ensuring the visuals
-          // are not "baked in" to the parent's PNG.
-          const originalOpacities = new Map();
-          if ('children' in figmaNode && figmaNode.children) {
-            for (const childNode of figmaNode.children) {
-              if (childNode.visible) {
-                 originalOpacities.set(childNode, childNode.opacity);
-                 childNode.opacity = 0;
-                 hiddenNodes.push(childNode);
+          // CRITICAL: Neither opacity=0 NOR visible=false work with Figma's exportAsync!
+          // Both still render children in the output. PROVEN: original=102KB vs clone-stripped=79KB.
+          // The ONLY reliable approach: clone the node, remove children, export BG-only clone.
+          if ('children' in figmaNode && figmaNode.children && figmaNode.children.length > 0) {
+            const clone = figmaNode.clone();
+            // Disable auto-layout so removing children doesn't collapse the frame
+            if ('layoutMode' in clone) clone.layoutMode = 'NONE';
+            // Force dimensions to match original
+            clone.resize(figmaNode.width, figmaNode.height);
+            // Strip all children — only frame fills/strokes remain
+            while (clone.children.length > 0) clone.children[0].remove();
+            // ── SMART SELECTIVE STRIPPING for hybrid _BG clones ──
+            // Strip ONLY properties that cause transparent padding in exportAsync.
+            // Keep properties that render INSIDE the frame (part of visual design).
+            //
+            // | Property              | Strip? | Reason                                    |
+            // |-----------------------|--------|-------------------------------------------|
+            // | cornerRadius          | YES    | Roblox UICorner handles rounding           |
+            // | DROP_SHADOW           | YES    | Transparent padding beyond frame           |
+            // | LAYER_BLUR            | YES    | Blurs content beyond frame bounds          |
+            // | INNER_SHADOW          | NO     | Renders inside — designed highlight        |
+            // | BACKGROUND_BLUR       | NO     | Doesn't expand bounds                     |
+            // | stroke INSIDE         | NO     | Renders inside — designed card border      |
+            // | stroke CENTER/OUTSIDE | YES    | Extends beyond frame bounds                |
+
+            // 1. CornerRadius → always strip (Roblox UICorner handles rounding)
+            if ('cornerRadius' in clone) clone.cornerRadius = 0;
+            if ('topLeftRadius' in clone) clone.topLeftRadius = 0;
+            if ('topRightRadius' in clone) clone.topRightRadius = 0;
+            if ('bottomLeftRadius' in clone) clone.bottomLeftRadius = 0;
+            if ('bottomRightRadius' in clone) clone.bottomRightRadius = 0;
+
+            // 2. Effects → strip only OUTER effects (DROP_SHADOW, LAYER_BLUR)
+            //    Keep INNER_SHADOW and BACKGROUND_BLUR (render inside frame)
+            if ('effects' in clone && clone.effects && clone.effects.length > 0) {
+              clone.effects = clone.effects.filter((e: any) => {
+                return e.type === 'INNER_SHADOW' || e.type === 'BACKGROUND_BLUR';
+              });
+            }
+
+            // 3. Strokes → strip only CENTER/OUTSIDE (expand bounds)
+            //    Keep INSIDE strokes (card borders — part of visual design)
+            if ('strokes' in clone && clone.strokes && clone.strokes.length > 0) {
+              const align = ('strokeAlign' in clone) ? clone.strokeAlign : 'CENTER';
+              if (align !== 'INSIDE') {
+                clone.strokes = [];
+                if ('strokeWeight' in clone) clone.strokeWeight = 0;
               }
             }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            exportTarget = clone;
+            cloneToCleanup = clone;
+            console.log('[FigmaForge] Clone+strip: removed ' + figmaNode.children.length + ' children, selective strip for hybrid: ' + figmaNode.name);
           }
-          console.log('[FigmaForge] Temporarily set opacity=0 for ' + hiddenNodes.length + ' children for hybrid: ' + figmaNode.name);
-          // CRITICAL: Figma's render pipeline needs a tick to process visibility changes
-          // before exportAsync captures the frame. Without this, children are still
-          // baked into the exported PNG.
-          // Wait for FIGMA to process the visual change before capturing.
-          // Increased from 100ms to 250ms for more reliability in complex files.
-          await new Promise((resolve) => setTimeout(resolve, 250));
         }
 
-        const pngBytes = await figmaNode.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
-                // Restore opacities
-          for (const node of hiddenNodes) {
-            node.opacity = originalOpacities.get(node) ?? 1;
-          }
+        const pngBytes = await exportTarget.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
+        // Cleanup clone
+        if (cloneToCleanup) {
+          cloneToCleanup.remove();
+        }
 
         const hash = irNode._rasterizedImageHash;
         exportedImages[hash] = uint8ToBase64(pngBytes);

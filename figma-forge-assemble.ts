@@ -217,7 +217,7 @@ function emitNode(
 
   switch (strategy) {
     case 'png':
-      return emitPngNode(node, zIndex, isRoot, parentHasAutoLayout, parentWidth, parentHeight);
+      return emitPngNode(node, zIndex, isRoot, parentHasAutoLayout, parentWidth, parentHeight, config);
     case 'text_dynamic':
       return emitDynamicTextNode(node, config, zIndex, parentHasAutoLayout, parentWidth, parentHeight);
     case 'container':
@@ -228,6 +228,10 @@ function emitNode(
 /**
  * Emit a visual node as an ImageLabel with its uploaded PNG asset.
  * This handles: visual frames, icons, designed text, leaf nodes.
+ * 
+ * GENERIC RULE: [Flatten] nodes that match interactive patterns (e.g. *Btn*)
+ * automatically get an _Interact TextButton overlay injected as a child.
+ * This ensures baked buttons are still clickable without manual post-processing.
  */
 function emitPngNode(
   node: FigmaForgeNode,
@@ -236,6 +240,7 @@ function emitPngNode(
   parentHasAutoLayout: boolean = false,
   parentWidth: number = 0,
   parentHeight: number = 0,
+  config?: RuntimeConfig,
 ): string {
   const ref = nextRef();
   const rb = node._renderBounds;
@@ -304,6 +309,14 @@ function emitPngNode(
   }
 
   lines.push(`</Properties>`);
+
+  // ── GENERIC RULE: Auto-inject _Interact overlay for interactive [Flatten] PNG nodes ──
+  // [Flatten] nodes are emitted as PNG (no container recursion), so they normally skip
+  // the _Interact overlay. But interactive ones (e.g. CloseBtn) need clickable overlays.
+  if (config && (node as any)._isFlattened && isInteractive(node.name, config)) {
+    lines.push(emitInteractiveOverlay(node.name, zIndex));
+  }
+
   lines.push(`</Item>`);
   return lines.join('\n');
 }
@@ -347,17 +360,25 @@ function emitDynamicTextNode(
   const hAlignMap: Record<string, number> = { LEFT: 0, CENTER: 2, RIGHT: 1, JUSTIFIED: 0 };
   const vAlignMap: Record<string, number> = { TOP: 0, CENTER: 1, BOTTOM: 2 };
 
-  // ── GENERIC FIX: Dynamic text ($prefix) uses parent-relative width + AutomaticSize ──
-  // Figma text bounds are snapped to static content — at runtime the text changes,
-  // so we use parent-fill width and let Roblox auto-size the height.
+  // ── GENERIC FIX: Dynamic text sizing depends on Figma resize mode ──
+  // - WIDTH_AND_HEIGHT (HUG): keep Figma pixel size, let AutomaticSize=XY grow on demand.
+  //   This preserves the narrow text box inside auto-layout that gets centered by UIListLayout.
+  // - HEIGHT only: fill parent width (XS=1) so wrapping text uses all available space.
   const isDynamic = name.startsWith(config.dynamicPrefix);
+  const resizeMode = node.textAutoResize ?? 'HEIGHT';
+  const isHugText = resizeMode === 'WIDTH_AND_HEIGHT';
 
   const [basePosXml, baseSizeXml, baseAnchorXml] = emitGeometry(node, false, parentHasAutoLayout, parentWidth, parentHeight, Math.round(node.width), Math.round(node.height));
   
-  // Size override: dynamic text inside auto-layout forces Scale X = 1
-  const sizeXml = (isDynamic && parentHasAutoLayout)
-    ? `<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>0</YS><YO>${Math.round(node.height)}</YO></UDim2>`
-    : baseSizeXml;
+  // Size override: only HEIGHT-resize text fills parent width (for wrapping).
+  // HUG text keeps its Figma pixel width — auto-layout UIListLayout handles centering.
+  let sizeXml: string;
+  if (isDynamic && parentHasAutoLayout && !isHugText) {
+    // Wrapping text: fill parent width, fixed height
+    sizeXml = `<UDim2 name="Size"><XS>1</XS><XO>0</XO><YS>0</YS><YO>${Math.round(node.height)}</YO></UDim2>`;
+  } else {
+    sizeXml = baseSizeXml;
+  }
 
   // OVERRIDE AnchorPoint and Position based on text alignment for non-autolayout containers!
   // If we don't do this, center-aligned text will grow strictly to the right from X=0.
@@ -379,6 +400,14 @@ function emitDynamicTextNode(
     anchorXml = (ax !== 0 || ay !== 0) ? `<Vector2 name="AnchorPoint"><X>${ax}</X><Y>${ay}</Y></Vector2>` : '';
   }
 
+  // ── GENERIC RULE: HUG text in centered auto-layout → CENTER alignment ──
+  // In Figma, HUG text + centered auto-layout = visually centered (text box fits content exactly).
+  // In Roblox, font rendering differs so the auto-sized box may not exactly fit, making LEFT visible.
+  let effectiveHAlign = ts?.textAlignHorizontal ?? ts?.textAlign ?? node.textAlignHorizontal ?? 'LEFT';
+  if (isHugText && parentHasAutoLayout && effectiveHAlign === 'LEFT') {
+    effectiveHAlign = 'CENTER';
+  }
+
   const lines: string[] = [
     `<Item class="TextLabel" referent="${ref}">`,
     `<Properties>`,
@@ -393,7 +422,7 @@ function emitDynamicTextNode(
     `<float name="TextSize">${ts?.fontSize ?? ts?.size ?? node.fontSize ?? 14}</float>`,
     colorXml('TextColor3', textColor),
     `<Font name="FontFace"><Family><url>${fontFamily}</url></Family><Weight>${fontWeight}</Weight><Style>Normal</Style></Font>`,
-    `<token name="TextXAlignment">${hAlignMap[ts?.textAlignHorizontal ?? ts?.textAlign ?? node.textAlignHorizontal ?? 'LEFT'] ?? 0}</token>`,
+    `<token name="TextXAlignment">${hAlignMap[effectiveHAlign] ?? 0}</token>`,
     `<token name="TextYAlignment">${vAlignMap[ts?.textAlignVertical ?? node.textAlignVertical ?? 'TOP'] ?? 0}</token>`,
   ];
 
@@ -482,10 +511,16 @@ function emitContainerNode(
   const solidFillOpacity = (node as any)._solidFillOpacity as number | undefined;
 
   // ── Background color/transparency computation ──
+  // GENERIC RULE: Root frame (Figma section/page) ALWAYS gets BackgroundTransparency=1.
+  // Figma sections export with solid gray fills that must not render in Roblox.
   let bgTransparency = 1;
   let bgColor: FigmaColor | undefined = undefined;
+  const skipBgFill = isRoot; // Root frames never render background fills
 
-  if (hasRasterBG) {
+  if (skipBgFill) {
+    // Root frame: always transparent (Figma section fills are discarded)
+    bgTransparency = 1;
+  } else if (hasRasterBG) {
     // If a rasterized background image (ImageLabel) will be injected, the container Frame
     // must be fully transparent to prevent solid colors (like Roblox's default gray)
     // from rendering behind rounded corners, drop shadows, or translucent pixels in the PNG.
@@ -529,18 +564,30 @@ function emitContainerNode(
     lines.push(`<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`);
   }
   if (isRoot) {
-    // Respect Figma's clipsContent — some modals intentionally overflow (e.g. close button, title bar)
-    lines.push(`<bool name="ClipsDescendants">${!!node.clipsContent}</bool>`);
+    // ── GENERIC RULE: Root containers with rounded corners force ClipsDescendants=true ──
+    // Figma may set clipsContent=false on sections, but children like TitleBar extend to
+    // full width and poke out at UICorner rounded edges. Force clipping when corners are rounded.
+    const hasRoundedCorners = typeof node.cornerRadius === 'number' ? node.cornerRadius > 0
+      : (Array.isArray(node.cornerRadius) ? node.cornerRadius.some((r: number) => r > 0) : false);
+    const rootClips = hasRoundedCorners || !!node.clipsContent;
+    lines.push(`<bool name="ClipsDescendants">${rootClips}</bool>`);
   }
 
   if (sizing.autoSizeToken > 0) {
     lines.push(`<token name="AutomaticSize">${sizing.autoSizeToken}</token>`);
   }
 
-  if (node.clipsContent && !isScroll && !isRoot) {
-    // Hybrid containers with render bounds may have effects that extend beyond node bounds.
-    // The frame itself uses exact Figma size, but _BG extends for effects — so clipping is safe.
-    lines.push(`<bool name="ClipsDescendants">true</bool>`);
+  // ── GENERIC RULE: Containers with rounded corners or explicit clipping ──
+  // Figma may set clipsContent=false on containers with cornerRadius > 0, but in Roblox
+  // children like TitleBar extend to full width and poke out at UICorner rounded edges.
+  // Force ClipsDescendants=true when corners are rounded.
+  if (!isRoot) {
+    const cr = typeof node.cornerRadius === 'number' ? node.cornerRadius
+      : (Array.isArray(node.cornerRadius) ? Math.max(...(node.cornerRadius as number[])) : 0);
+    const shouldClip = (node.clipsContent && !isScroll) || cr > 0;
+    if (shouldClip) {
+      lines.push(`<bool name="ClipsDescendants">true</bool>`);
+    }
   }
 
   if (isRoot) {
@@ -586,7 +633,11 @@ function emitContainerNode(
     // ROOT containers should NOT expand _BG — the outer shadow is unnecessary
     // in-game (modal floats over dimmed overlay) and causes children (like title bars)
     // to appear narrower than the dark background.
-    const hasRenderBounds = !isRoot && !!(rb && (rb.width > node.width + 0.5 || rb.height > node.height + 0.5));
+    // HYBRID nodes (_isHybrid): outer effects are STRIPPED during clone+strip export,
+    // so the PNG is always frame-sized. _renderBounds are STALE — ignore them.
+    // Only [Flatten] atoms (non-hybrid) preserve outer effects and need render bounds.
+    const isHybrid = !!(node as any)._isHybrid;
+    const hasRenderBounds = !isRoot && !isHybrid && !!(rb && (rb.width > node.width + 0.5 || rb.height > node.height + 0.5));
     const bgXO = hasRenderBounds ? Math.round(rb!.x - node.x) : 0;
     const bgYO = hasRenderBounds ? Math.round(rb!.y - node.y) : 0;
     const bgW = hasRenderBounds ? Math.round(rb!.width) : 0;
@@ -610,6 +661,21 @@ function emitContainerNode(
     lines.push(`<Content name="Image"><url>${bgAsset}</url></Content>`);
     lines.push(`<token name="ScaleType">0</token>`);
     lines.push(`</Properties>`);
+    // ── UICorner on _BG: Roblox's ClipsDescendants clips to RECTANGULAR bounds only ──
+    // UICorner on the parent Frame does NOT round children's corners.
+    // Each _BG ImageLabel needs its own UICorner to match the parent's rounded corners.
+    const bgCr = typeof node.cornerRadius === 'number' ? node.cornerRadius
+      : (Array.isArray(node.cornerRadius) ? node.cornerRadius[0] : 0);
+    if (bgCr > 0) {
+      const bgCrRef = nextRef();
+      lines.push(`<Item class="UICorner" referent="${bgCrRef}"><Properties>`);
+      if (bgCr >= Math.min(node.width, node.height) / 2) {
+        lines.push(`<UDim name="CornerRadius"><S>0.5</S><O>0</O></UDim>`);
+      } else {
+        lines.push(`<UDim name="CornerRadius"><S>0</S><O>${Math.round(bgCr)}</O></UDim>`);
+      }
+      lines.push(`</Properties></Item>`);
+    }
     lines.push(`</Item>`);
   }
 
@@ -666,6 +732,16 @@ function emitContainerNode(
   // Otherwise, children must render above the _BG underlay.
   const childZBase = useContentWrapper ? 1 : (hasRasterBG ? 2 : 1);
   let maxChildZ = 0;
+
+  // ── GENERIC RULE: Promote overflowing children when parent clips (cornerRadius) ──
+  // When ClipsDescendants=true (from cornerRadius), children exceeding bounds get clipped.
+  // Intentionally overflowing elements (like CloseBtn at -5y) must be promoted as siblings
+  // with their position adjusted from parent-relative to grandparent-relative coordinates.
+  const parentCr = typeof node.cornerRadius === 'number' ? node.cornerRadius
+    : (Array.isArray(node.cornerRadius) ? Math.max(...(node.cornerRadius as number[])) : 0);
+  const parentClips = parentCr > 0 && !isRoot;
+  const promotedChildrenXml: string[] = [];
+
   if (node.children) {
     node.children.forEach((child, i) => {
       const childZ = childZBase + i;
@@ -681,8 +757,20 @@ function emitContainerNode(
         if (cx < 0 || cy < 0) {
           // Negative positions now safely preserved by UDim2 translation and Content wrapping
         }
-        if (cx + cw > pw + 5 || cy + ch > ph + 5) {
+        const exceedsBounds = cx < 0 || cy < 0 || cx + cw > pw + 5 || cy + ch > ph + 5;
+        if (exceedsBounds) {
           console.warn(`[FigmaForge] ⚠️  Child "${child.name}" (${cw}×${ch} at ${cx},${cy}) exceeds parent "${node.name}" bounds (${pw}×${ph})`);
+        }
+
+        // Promote ONLY overflowing INTERACTIVE children when parent clips due to cornerRadius.
+        // Decorative elements (icons, bg images) intentionally overflow for visual effect — keep them.
+        // Only interactive elements (buttons, close) need promotion for clickability.
+        if (exceedsBounds && parentClips && isInteractive(child.name, config)) {
+          // Adjust position: parent-relative → grandparent-relative
+          const promoted = { ...child, x: child.x + node.x, y: child.y + node.y };
+          const promotedXml = emitNode(promoted as FigmaForgeNode, config, childZ + 100, false, false, 0, 0);
+          promotedChildrenXml.push(promotedXml);
+          return; // Skip inline emission — will be emitted as sibling
         }
       }
 
@@ -702,6 +790,12 @@ function emitContainerNode(
   }
 
   lines.push(`</Item>`);
+
+  // Append promoted (overflowing) children as siblings of this container
+  if (promotedChildrenXml.length > 0) {
+    lines.push(...promotedChildrenXml);
+  }
+
   return lines.join('\n');
 }
 

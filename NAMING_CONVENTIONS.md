@@ -1,16 +1,6 @@
 # FigmaForge Naming Conventions
 
-> **For Figma designers** — naming your layers correctly enables fully automatic Roblox export and runtime wiring. No code changes needed.
-
-## 3 Ways to Annotate
-
-| Method | Where | Example | Best For |
-|---|---|---|---|
-| **Name Suffix** | Layer name | `BulletPoint[Template]` | Clear, visible in layer panel |
-| **Name Pattern** | Layer name | `$Price`, `CloseBtn` | Compact, familiar conventions |
-| **Description** | Figma description | `@template` | Clean names, metadata-driven |
-
----
+> **For Figma designers** — naming layers correctly enables fully automatic Roblox export. No code changes needed.
 
 ## Convention Suffixes
 
@@ -18,142 +8,70 @@ Add these to any Figma layer name:
 
 | Suffix | Effect in Roblox | Example |
 |---|---|---|
-| `[Template]` | Hidden by default, cloned at runtime for lists | `BulletPoint[Template]` |
+| `[Flatten]` | Rasterized as single PNG (children baked into image) | `TitleGroup[Flatten]` |
 | `[Scroll]` | Becomes a `ScrollingFrame` | `ContentPane[Scroll]` |
-| `[Flatten]` | Rasterized as single PNG (ignores children) | `IconGroup[Flatten]` |
+| `[Template]` | Hidden by default, cloned at runtime for lists | `BulletPoint[Template]` |
 
 ## Name Patterns
 
 | Pattern | Detection | Roblox Behavior |
 |---|---|---|
-| `$Price`, `$Timer` | `$` prefix → dynamic text | Emitted as TextLabel, auto-bound |
-| `CloseBtn`, `SubmitButton` | `*Btn`, `*Button` suffix | Auto-detected as interactive |
-| `Tab_v0_1`, `Tab_Settings` | `Tab_` prefix | Grouped into tab sets |
-| `_Interact` suffix | On TextButton overlays | Click handler wiring point |
+| `$Price`, `$Timer` | `$` prefix → dynamic text | TextLabel with `$` prefix, game code sets `.Text` |
+| `CloseBtn`, `SubmitButton` | `*Btn`, `*Button`, `*close*` | Auto-gets invisible `_Interact` TextButton overlay |
+| `_BG` | Background layer name | Auto-generated for hybrid containers (gradient/image fills) |
 
-## Description Metadata
+## Text Classification (Current Behavior)
 
-Add these tags to the Figma **node description** (select layer → right panel → description field):
+**ALL text nodes → TextLabel.** Text is never rasterized as PNG.
 
-| Tag | Effect | Example |
-|---|---|---|
-| `@template` | Same as `[Template]` suffix | Add to a repeating row |
-| `@scroll` | Same as `[Scroll]` suffix | Add to an overflowing container |
-| `@button` | Same as `*Btn` pattern | Mark any frame as clickable |
-| `@tab` | Same as `Tab_` prefix | Mark as tab in a group |
-| `@bind:keyName` | Explicit data binding key | `@bind:playerLevel` on a TextLabel |
+Two categories control naming:
+- **Dynamic** (`$` prefix added): name starts with `$`, or matches patterns (`price`, `timer`, `count`, `level`, etc.), or content looks like a value (`$1,234`, `x3`, `50%`, `00:00`)
+- **Static** (original name kept): everything else — labels, headers, button text
 
----
+Dynamic pattern list (SSOT in `figma-forge-shared.ts` `DEFAULT_CONFIG`):
+```
+Name: price, unit, socket, stats, timer, count, amount, level, score, currency, health, progress, rank, value, quantity
+Text: {values}, $1.2K, 1234, 00:00, x3, Level 5, Lv.42, PlayerName, 0, 50%, ..., →, emojis, ?
+```
 
-## Dynamic Text Detection
+## Interactive Detection
 
-Text nodes are classified as **dynamic** (→ TextLabel) or **designed** (→ PNG) based on these rules:
+Patterns (case-insensitive): `btn`, `button`, `close`, `submit`, `toggle`, `tab_`, `back`, `_tab`
 
-1. Name starts with `$` (e.g. `$Price`, `$Timer`)
-2. Name matches a pattern: `price`, `unit`, `socket`, `stats`, `timer`, `count`, `amount`, `level`, `score`, `currency`, `health`
-3. Content matches: single `?`, placeholder-style text
-4. Has `@bind:key` in description
+Auto-generates `<ParentName>_Interact` TextButton overlay (invisible, `AutoButtonColor=false`).
 
-**All other text** is exported as a PNG ImageLabel (preserving exact Figma styling).
+`[Flatten]` nodes matching interactive patterns also get `_Interact` overlays injected automatically.
 
----
+## Scroll Detection
 
-## Interactive Elements
+Three methods (any triggers ScrollingFrame):
+1. Figma native: `Overflow` set to Horizontal/Vertical/Both
+2. Name suffix: `[Scroll]`
+3. Description: `@scroll` in Figma node description
 
-Any frame/group with children that has a `TextButton` named `<ParentName>_Interact` is treated as interactive. The `_Interact` overlay is an invisible button used for click detection.
+## Font Mapping
 
-**Close buttons** are auto-detected when the parent name contains `close` (case-insensitive).
+Unmapped fonts fall back to `BuilderSans`. See `FONT_MAP` in `figma-forge-shared.ts` for full mapping (40+ fonts).
 
----
+## Root Frame Rules
+
+- Root frame (Figma section/page wrapper) always gets `BackgroundTransparency=1` — Figma section fills are discarded
+- Root frame auto-centered: `AnchorPoint(0.5,0.5)` + `Position(0.5,0,0.5,0)`
+- Root frame with rounded corners → `ClipsDescendants=true`
+- `ZIndexBehavior=Sibling` for proper layering
 
 ## Example Layer Tree
 
 ```
-📁 UpdateLogModal                    ← Root frame
-  📁 TitleBar                        ← Container with drop shadow
-    🖼️ _BG                           ← Rasterized background (PNG)
-    📝 Title                         ← Designed text (PNG)
-    📁 CloseBtn                      ← Close button group
-      🖼️ _BG                        ← Button background (PNG)
-      🔘 CloseBtn_Interact           ← Invisible click target
-  📁 TabSidebar                      ← Tab group container
-    📁 Tab_v0_2                      ← Tab frame (auto-grouped)
-      📝 v0.2 ⚡                     ← Tab label
-      🔘 Tab_v0_2_Interact           ← Tab click target
-    📁 Tab_v0_1                      ← Another tab
-      📝 v0.1 🚀
-      🔘 Tab_v0_1_Interact
-  📁 ContentPane[Scroll]             ← ScrollingFrame (explicit)
-    📝 $UpdateTitle                  ← Dynamic text (bound at runtime)
-    📝 $TeaserLine                   ← Dynamic text
-    📁 BulletPoint[Template]         ← Template row (cloned per item)
-      📝 $LineText                   ← Dynamic text inside template
-```
-
----
-
-## UI Kit Page Conventions
-
-When using `figma-forge-kit` to extract a full UI Kit page:
-
-### Component Sets (Multi-State Atoms)
-
-Figma component sets with variants are auto-assembled into state-aware Kit atoms:
-
-```
-📦 TabButton (Component Set)
-  ├── State=Default        → Kit.TabButton({ state = "Default" })
-  ├── State=Hover          → Kit.TabButton({ state = "Hover" })
-  ├── State=Active         → Kit.TabButton({ state = "Active" })
-  └── State=Disabled       → Kit.TabButton({ state = "Disabled" })
-```
-
-**State switching at runtime:**
-```lua
-local tab = Kit.TabButton({ text = "Shop", state = "Default" })
--- On hover:
-Kit.SetState(tab, "Hover")
--- On click:
-Kit.SetState(tab, "Active")
-```
-
-### Dedup Behavior
-
-PNGs are deduplicated by SHA-256 visual hash:
-- If `State=Default` and `State=Hover` look identical → **1 upload**, both states share the asset
-- Saves bandwidth and Roblox assets on iterative re-exports
-
-### Standalone Components
-
-Components without variants (icons, dividers, badges) become simple factory functions:
-```lua
-local gem = Kit.Icon_Gem()
-local divider = Kit.Divider({ size = UDim2.fromOffset(300, 2) })
-```
-
----
-
-## Runtime Usage
-
-```lua
-local FFR = require(RS.Packages.FigmaForgeRuntime)
-
-local ui = FFR.Mount("UpdateLogModal", playerGui, {
-    UpdateTitle = "⚡ v0.2 — Big Update!",
-    TeaserLine = "🔥 COMING SOON: Trading!",
-})
-
-ui:SetList("BulletPoint", {
-    "🧬 Mutation System: 8 new mutations",
-    "⚔️ PvP Arena: 3v3 skill-based combat",
-    "🏰 Clan Wars: Territory battles",
-})
-
-ui:OnClick("CloseBtn", function() ui:Hide() end)
-ui:OnTab("TabSidebar", function(tabKey)
-    -- tabKey = "v0_2" or "v0_1"
-    loadContent(tabKey)
-end)
-
-ui:Show()
+📁 🔄 Rebirth Modal              ← Figma SECTION (root, bg discarded)
+  📁 ModalFrame                   ← Container Frame
+    📁 _BG                        ← Rasterized gradient background (ImageLabel)
+    📁 TitleGroup[Flatten]        ← Baked: gradient title text → PNG
+    📝 $RebirthName               ← Dynamic TextLabel (game sets .Text)
+    📁 CloseBtn                   ← Interactive container
+      📁 _BG                      ← Button face PNG
+      🔘 CloseBtn_Interact        ← Auto-injected click target
+    📁 ContentArea
+      📝 $MultiplierLabel         ← Dynamic text
+      📁 UpgradeRow               ← Container with auto-layout
 ```

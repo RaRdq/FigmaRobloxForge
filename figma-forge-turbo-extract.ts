@@ -92,12 +92,15 @@ function buildBatchRasterScript(
   hashesToExport: string[],
   batchIndex: number,
   scale: number,
+  flattenKeys: Set<string> = new Set(),
 ): string {
   const hashList = JSON.stringify(hashesToExport);
+  const flattenList = JSON.stringify([...flattenKeys].filter(k => hashesToExport.includes(k)));
   return `
 async function main() {
   // Batch ${batchIndex}: export ${hashesToExport.length} image hashes
   const TARGET_HASHES = new Set(${hashList});
+  const FLATTEN_KEYS = new Set(${flattenList}); // [Flatten] nodes: export WITH children (bake text into image)
   const scale = ${scale};
   const exportedImages = {};
   const notFound = [];
@@ -135,27 +138,78 @@ async function main() {
     if (TARGET_HASHES.has(rasterKey)) {
       TARGET_HASHES.delete(rasterKey);
       try {
-        // --- PREVENT BAKED CHILDREN: Hide ALL children before rasterizing hybrid _BG ---
-        // When rasterizing a container's background, ALL children must be INVISIBLE so only
-        // the fill/stroke/effects of the container itself are captured.
-        // CRITICAL: Must use visible=false, NOT opacity=0!
-        // opacity=0 still renders shapes/strokes in Figma's exportAsync output.
-        // visible=false truly removes the node from the render pass.
-        const hiddenNodes = [];
-        if ('children' in node && node.children) {
-          for (const child of node.children) {
-            if (child.visible !== false) {
-              hiddenNodes.push({ node: child, oldVisible: child.visible });
-              child.visible = false;
+        // --- CHILD VISIBILITY: Hybrid nodes hide children (BG only), Flatten nodes keep children (bake text) ---
+        // [Flatten] nodes: children are text/icons that must be baked INTO the exported image.
+        // Hybrid nodes: children are separate UI elements, only the container BG should be captured.
+        //
+        // CRITICAL: Neither opacity=0 NOR visible=false work with Figma's exportAsync!
+        // Both still render children in the output. PROVEN: original=102KB vs clone-stripped=79KB.
+        // The ONLY reliable approach is CLONE + STRIP: clone the node, remove all children
+        // from the clone, export the clone (BG-only), then delete the clone.
+        const isFlatten = FLATTEN_KEYS.has(rasterKey);
+        
+        let exportNode = node;
+        let cloneToDelete = null;
+        if (!isFlatten && 'children' in node && node.children && node.children.length > 0) {
+          // Clone the frame to get an independent copy
+          const clone = node.clone();
+          // Disable auto-layout so removing children doesn't collapse the frame
+          if ('layoutMode' in clone) clone.layoutMode = 'NONE';
+          // Force the clone to match the original frame dimensions
+          clone.resize(node.width, node.height);
+          // Remove ALL children from the clone — only frame fills remain
+          while (clone.children.length > 0) {
+            clone.children[0].remove();
+          }
+          // ── SMART SELECTIVE STRIPPING for hybrid _BG clones ──
+          // Strip ONLY properties that cause transparent padding in exportAsync.
+          // Keep properties that render INSIDE the frame (part of visual design).
+          //
+          // | Property              | Strip? | Reason                                    |
+          // |-----------------------|--------|-------------------------------------------|
+          // | cornerRadius          | YES    | Roblox UICorner handles rounding           |
+          // | DROP_SHADOW           | YES    | Transparent padding beyond frame           |
+          // | LAYER_BLUR            | YES    | Blurs content beyond frame bounds          |
+          // | INNER_SHADOW          | NO     | Renders inside — designed highlight        |
+          // | BACKGROUND_BLUR       | NO     | Doesn't expand bounds                     |
+          // | stroke INSIDE         | NO     | Renders inside — designed card border      |
+          // | stroke CENTER/OUTSIDE | YES    | Extends beyond frame bounds                |
+
+          // 1. CornerRadius → always strip (Roblox UICorner handles rounding)
+          if ('cornerRadius' in clone) clone.cornerRadius = 0;
+          if ('topLeftRadius' in clone) clone.topLeftRadius = 0;
+          if ('topRightRadius' in clone) clone.topRightRadius = 0;
+          if ('bottomLeftRadius' in clone) clone.bottomLeftRadius = 0;
+          if ('bottomRightRadius' in clone) clone.bottomRightRadius = 0;
+
+          // 2. Effects → strip only OUTER effects (DROP_SHADOW, LAYER_BLUR)
+          //    Keep INNER_SHADOW and BACKGROUND_BLUR (render inside frame)
+          if ('effects' in clone && clone.effects && clone.effects.length > 0) {
+            clone.effects = clone.effects.filter(function(e) {
+              return e.type === 'INNER_SHADOW' || e.type === 'BACKGROUND_BLUR';
+            });
+          }
+
+          // 3. Strokes → strip only CENTER/OUTSIDE (expand bounds)
+          //    Keep INSIDE strokes (card borders — part of visual design)
+          if ('strokes' in clone && clone.strokes && clone.strokes.length > 0) {
+            var align = ('strokeAlign' in clone) ? clone.strokeAlign : 'CENTER';
+            if (align !== 'INSIDE') {
+              clone.strokes = [];
+              if ('strokeWeight' in clone) clone.strokeWeight = 0;
             }
           }
+          // Small wait for Figma to process the removals
+          await new Promise(function(r) { setTimeout(r, 100); });
+          exportNode = clone;
+          cloneToDelete = clone;
         }
         
-        const bytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
+        const bytes = await exportNode.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
         
-        // --- RESTORE VISIBILITY ---
-        for (const item of hiddenNodes) {
-           item.node.visible = item.oldVisible;
+        // --- CLEANUP: Delete the clone ---
+        if (cloneToDelete) {
+          cloneToDelete.remove();
         }
         
         exportedImages[rasterKey] = uint8ToBase64(bytes);
@@ -276,7 +330,20 @@ console.log('Next step: npx ts-node figma-forge-cli.ts --input ' + MANIFEST_PATH
 
 async function main() {
   const args = parseArgs();
-  const outputDir = path.dirname(args.output);
+
+  // CRITICAL: All ephemeral output goes to project-level temp/figmaforge/, NOT the FigmaForge source dir.
+  // This keeps the public repo clean — no batch scripts, manifests, or merge scripts in source.
+  const FORGE_DIR = path.resolve(__dirname, '..');
+  const PROJECT_ROOT = path.resolve(FORGE_DIR, '..', '..');
+  const TEMP_DIR = path.join(PROJECT_ROOT, 'temp', 'figmaforge');
+  if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+
+  // Resolve output path: if relative (no directory), put it in TEMP_DIR
+  const MANIFEST_PATH = path.isAbsolute(args.output) 
+    ? args.output 
+    : path.join(TEMP_DIR, path.basename(args.output));
+  const outputDir = path.dirname(MANIFEST_PATH);
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
   // Load config if provided
   let extraConfig: Partial<FigmaForgeConfig> = {};
@@ -301,18 +368,18 @@ async function main() {
   fs.writeFileSync(treeScriptPath, extractionScript);
   console.log(`[Turbo] ✅ Tree extraction script: ${treeScriptPath}`);
   console.log(`[Turbo] → Run via figma_execute to get the tree structure + unresolvedImages list`);
-  console.log(`[Turbo] → Save result to: ${args.output}`);
+  console.log(`[Turbo] → Save result to: ${MANIFEST_PATH}`);
   console.log('');
 
   // Step 2: Check if manifest already exists (from a previous tree extraction)
-  if (!fs.existsSync(args.output)) {
-    console.log('[Turbo] ℹ Manifest not found yet. Run extract_tree.js first, save result to:', args.output);
+  if (!fs.existsSync(MANIFEST_PATH)) {
+    console.log('[Turbo] ℹ Manifest not found yet. Run extract_tree.js first, save result to:', MANIFEST_PATH);
     console.log('[Turbo] ℹ Then re-run this script to generate batch export scripts.');
     return;
   }
 
   // Step 3: Load manifest and get unresolvedImages list
-  let manifest = JSON.parse(fs.readFileSync(args.output, 'utf8'));
+  let manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
   if (manifest.success === true && manifest.result) manifest = manifest.result;
 
   const unresolvedImages: string[] = manifest.unresolvedImages || [];
@@ -325,11 +392,28 @@ async function main() {
 
   if (toExport.length === 0) {
     console.log('[Turbo] ✅ All images already exported! Ready to assemble:');
-    console.log(`[Turbo] → npx ts-node figma-forge-cli.ts --input ${args.output} --output ../../src/ReplicatedStorage/<NAME>.rbxmx --resolve-images --verbose`);
+    console.log(`[Turbo] → npx ts-node figma-forge-cli.ts --input ${MANIFEST_PATH} --output ../../src/ReplicatedStorage/<NAME>.rbxmx --resolve-images --verbose`);
     return;
   }
 
-  // Step 4: Generate batch export scripts
+  // Step 4: Collect [Flatten] keys from manifest tree — these nodes must keep children visible during raster
+  const flattenKeys = new Set<string>();
+  function collectFlattenKeys(node: any) {
+    if (node._isFlattened) {
+      const rasterKey = 'raster_' + node.id.replace(/[:\;]/g, '_');
+      flattenKeys.add(rasterKey);
+    }
+    if (node.children) {
+      for (const child of node.children) collectFlattenKeys(child);
+    }
+  }
+  const tree = manifest.root || manifest.tree;
+  if (tree) collectFlattenKeys(tree);
+  if (flattenKeys.size > 0) {
+    console.log(`[Turbo] Found ${flattenKeys.size} [Flatten] nodes: ${[...flattenKeys].join(', ')}`);
+  }
+
+  // Step 5: Generate batch export scripts
   const batches: string[][] = [];
   for (let i = 0; i < toExport.length; i += args.batchSize) {
     batches.push(toExport.slice(i, i + args.batchSize));
@@ -338,14 +422,14 @@ async function main() {
   console.log(`[Turbo] Generating ${batches.length} batch scripts (${args.batchSize} images each):`);
   
   for (let i = 0; i < batches.length; i++) {
-    const script = buildBatchRasterScript(batches[i], i, args.scale);
+    const script = buildBatchRasterScript(batches[i], i, args.scale, flattenKeys);
     const scriptPath = path.join(outputDir, `batch_script_${i}.js`);
     fs.writeFileSync(scriptPath, script);
     console.log(`  [Batch ${i}] ${scriptPath} → ${batches[i].length} images: ${batches[i].map(h => h.substring(0, 8) + '...').join(', ')}`);
   }
 
-  // Step 5: Generate merge script
-  const mergeScript = buildMergeScript(args.output, batches.length);
+  // Step 6: Generate merge script
+  const mergeScript = buildMergeScript(MANIFEST_PATH, batches.length);
   const mergePath = path.join(outputDir, 'batch_merge.js');
   fs.writeFileSync(mergePath, mergeScript);
 
@@ -358,7 +442,7 @@ async function main() {
   console.log('[Turbo]     2. Call figma_execute with that content + timeout:30000');
   console.log('[Turbo]     3. Save result as batch_result_N.json');
   console.log('[Turbo]   Then run: node batch_merge.js');
-  console.log('[Turbo]   Then run: npx ts-node figma-forge-cli.ts --input', args.output, '--output ../../src/ReplicatedStorage/<NAME>.rbxmx --resolve-images --verbose');
+  console.log('[Turbo]   Then run: npx ts-node figma-forge-cli.ts --input', MANIFEST_PATH, '--output ../../src/ReplicatedStorage/<NAME>.rbxmx --resolve-images --verbose');
   console.log('[Turbo] ====================================================');
 }
 

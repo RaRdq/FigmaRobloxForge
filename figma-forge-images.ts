@@ -121,7 +121,27 @@ function getConfig(): { apiKey: string; creatorId: string } {
 
 // ─── Image Cache ─────────────────────────────────────────────────
 
-const CACHE_PATH = path.join(__dirname, '.figmaforge-image-cache.json');
+// Image cache MUST go to project-level temp/figmaforge/, NOT inside FigmaForge source dir.
+// NOTE: __dirname is unreliable — with `tsx` it resolves to '.' (CWD=tools/FigmaForge),
+// with compiled `dist/` it resolves to dist/. Use explicit marker-file detection.
+function findProjectRoot(): string {
+  let dir = path.resolve(__dirname);
+  // Walk up looking for project root markers
+  for (let i = 0; i < 10; i++) {
+    if (fs.existsSync(path.join(dir, 'rokit.toml')) || fs.existsSync(path.join(dir, 'default.project.json'))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // hit filesystem root
+    dir = parent;
+  }
+  // Fallback: assume CWD is inside tools/FigmaForge
+  return path.resolve(process.cwd(), '..', '..');
+}
+const PROJECT_ROOT = findProjectRoot();
+const CACHE_DIR = path.join(PROJECT_ROOT, 'temp', 'figmaforge');
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+const CACHE_PATH = path.join(CACHE_DIR, '.figmaforge-image-cache.json');
 
 function loadImageCache(): ImageCache {
   if (fs.existsSync(CACHE_PATH)) {
