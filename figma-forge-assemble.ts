@@ -541,14 +541,15 @@ function emitContainerNode(
   const solidFillOpacity = (node as any)._solidFillOpacity as number | undefined;
 
   // ── Background color/transparency computation ──
-  // GENERIC RULE: Root frame (Figma section/page) ALWAYS gets BackgroundTransparency=1.
-  // Figma sections export with solid gray fills that must not render in Roblox.
+  // Root frames MAY need background fills (e.g., modal dark BG). Only skip fills
+  // when the root has NO intentional fill at all (bare Figma section/page).
   let bgTransparency = 1;
   let bgColor: FigmaColor | undefined = undefined;
-  const skipBgFill = isRoot; // Root frames never render background fills
+  // Root frames with no solidFill and no rasterBG → transparent (Figma section default)
+  const skipBgFill = isRoot && !solidFill && !hasRasterBG;
 
   if (skipBgFill) {
-    // Root frame: always transparent (Figma section fills are discarded)
+    // Root frame with no intentional fill: always transparent
     bgTransparency = 1;
   } else if (hasRasterBG) {
     // If a rasterized background image (ImageLabel) will be injected, the container Frame
