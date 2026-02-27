@@ -478,7 +478,8 @@ async function main() {
             //
             // | Property              | Strip? | Reason                                    |
             // |-----------------------|--------|-------------------------------------------|
-            // | cornerRadius          | YES    | Roblox UICorner handles rounding           |
+            // | cornerRadius          | NO     | KEEP — PNG needs rounded corners to match  |
+            // |                       |        | UICorner, preventing sharp-cut artifacts   |
             // | DROP_SHADOW           | YES    | Transparent padding beyond frame           |
             // | LAYER_BLUR            | YES    | Blurs content beyond frame bounds          |
             // | INNER_SHADOW          | NO     | Renders inside — designed highlight        |
@@ -486,12 +487,8 @@ async function main() {
             // | stroke INSIDE         | NO     | Renders inside — designed card border      |
             // | stroke CENTER/OUTSIDE | YES    | Extends beyond frame bounds                |
 
-            // 1. CornerRadius → always strip (Roblox UICorner handles rounding)
-            if ('cornerRadius' in clone) clone.cornerRadius = 0;
-            if ('topLeftRadius' in clone) clone.topLeftRadius = 0;
-            if ('topRightRadius' in clone) clone.topRightRadius = 0;
-            if ('bottomLeftRadius' in clone) clone.bottomLeftRadius = 0;
-            if ('bottomRightRadius' in clone) clone.bottomRightRadius = 0;
+            // 1. CornerRadius → KEEP on clone (PNG renders with smooth rounded corners)
+            // Roblox UICorner clips to same radius — result is clean smooth corners
 
             // 2. Effects → strip only OUTER effects (DROP_SHADOW, LAYER_BLUR)
             //    Keep INNER_SHADOW and BACKGROUND_BLUR (render inside frame)
@@ -546,12 +543,16 @@ async function main() {
               if ('layoutMode' in shadowClone) shadowClone.layoutMode = 'NONE';
               shadowClone.resize(figmaNode.width, figmaNode.height);
               while (shadowClone.children.length > 0) shadowClone.children[0].remove();
-              // Strip cornerRadius
-              if ('cornerRadius' in shadowClone) shadowClone.cornerRadius = 0;
-              if ('topLeftRadius' in shadowClone) shadowClone.topLeftRadius = 0;
-              if ('topRightRadius' in shadowClone) shadowClone.topRightRadius = 0;
-              if ('bottomLeftRadius' in shadowClone) shadowClone.bottomLeftRadius = 0;
-              if ('bottomRightRadius' in shadowClone) shadowClone.bottomRightRadius = 0;
+              // KEEP cornerRadius — shadow follows the rounded shape
+              // REPLACE all fills with single SOLID near-transparent fill.
+              // Gradient fills at 0.01 still render visible gradient colors, hiding the shadow.
+              // Single solid black at 0.004 is imperceptible but provides shape for shadow engine.
+              shadowClone.fills = [{
+                type: 'SOLID',
+                color: { r: 0, g: 0, b: 0 },
+                opacity: 0.004,
+                visible: true
+              }];
               // Keep ONLY DROP_SHADOW effects
               if ('effects' in shadowClone && shadowClone.effects) {
                 shadowClone.effects = shadowClone.effects.filter(function(e) {

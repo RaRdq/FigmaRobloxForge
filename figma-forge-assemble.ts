@@ -608,14 +608,18 @@ function emitContainerNode(
     lines.push(`<token name="AutomaticSize">${sizing.autoSizeToken}</token>`);
   }
 
-  // ── GENERIC RULE: Containers with rounded corners or explicit clipping ──
-  // Figma may set clipsContent=false on containers with cornerRadius > 0, but in Roblox
-  // children like TitleBar extend to full width and poke out at UICorner rounded edges.
-  // Force ClipsDescendants=true when corners are rounded.
+  // ── Clipping: respect Figma's clipsContent BUT disable when children have shadows ──
+  // Shadow siblings are prepended into the PARENT container. If the parent clips,
+  // the shadow (which extends beyond the child's bounds) gets clipped and becomes invisible.
+  // The _BG ImageLabel with UICorner already handles visual rounding — we don't need
+  // Frame-level ClipsDescendants for that.
   if (!isRoot) {
-    const cr = typeof node.cornerRadius === 'number' ? node.cornerRadius
-      : (Array.isArray(node.cornerRadius) ? Math.max(...(node.cornerRadius as number[])) : 0);
-    const shouldClip = (node.clipsContent && !isScroll) || cr > 0;
+    // Check if any child has a shadow that will be emitted as sibling in THIS container
+    const childrenHaveShadows = node.children?.some(
+      (c: any) => !!(c as any)._shadowImageHash && !!(c as any)._resolvedShadowId
+    ) ?? false;
+    // Only clip when Figma explicitly clips AND no shadow siblings would be clipped
+    const shouldClip = node.clipsContent && !isScroll && !childrenHaveShadows;
     if (shouldClip) {
       lines.push(`<bool name="ClipsDescendants">true</bool>`);
     }
@@ -835,16 +839,12 @@ function emitContainerNode(
   const shadowAsset = (node as any)._resolvedShadowId as string | undefined;
   if (shadowAsset && rb) {
     const shadowRef = nextRef();
-    // Shadow position/size: _renderBounds capture the full shadow expansion
-    const shadowXO = Math.round(rb.x - node.x);
-    const shadowYO = Math.round(rb.y - node.y);
+    // _renderBounds from tree extraction stores ADJUSTED positions:
+    //   rb.x = ir.x - extraLeft  (node position minus shadow expansion)
+    //   rb.y = ir.y - extraTop   (node position minus shadow expansion)
+    // These ARE the final shadow positions relative to the parent — no need to add node.x/y again.
     const shadowW = Math.round(rb.width);
     const shadowH = Math.round(rb.height);
-    // Position relative to parent (offset from the container's position)
-    const containerPosXO = Math.round(node.x);
-    const containerPosYO = Math.round(node.y);
-    const shadowPosX = containerPosXO + shadowXO;
-    const shadowPosY = containerPosYO + shadowYO;
     
     const shadowLines: string[] = [
       `<Item class="ImageLabel" referent="${shadowRef}">`,
@@ -858,12 +858,15 @@ function emitContainerNode(
     
     if (isRoot) {
       // Root shadow: centered behind root frame, use scale-based positioning
-      shadowLines.push(`<UDim2 name="Position"><XS>0.5</XS><XO>${shadowXO}</XO><YS>0.5</YS><YO>${shadowYO}</YO></UDim2>`);
+      // For root, compute pure expansion offset: rb.x - node.x = -extraLeft
+      const rootExpX = Math.round(rb.x - node.x);
+      const rootExpY = Math.round(rb.y - node.y);
+      shadowLines.push(`<UDim2 name="Position"><XS>0.5</XS><XO>${rootExpX}</XO><YS>0.5</YS><YO>${rootExpY}</YO></UDim2>`);
       shadowLines.push(`<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`);
-    } else if (parentHasAutoLayout) {
-      // Auto-layout: shadow positioned absolutely (not managed by layout)
-      shadowLines.push(`<UDim2 name="Position"><XS>0</XS><XO>${shadowPosX}</XO><YS>0</YS><YO>${shadowPosY}</YO></UDim2>`);
     } else {
+      // Non-root: rb.x/y already includes node position — use directly
+      const shadowPosX = Math.round(rb.x);
+      const shadowPosY = Math.round(rb.y);
       shadowLines.push(`<UDim2 name="Position"><XS>0</XS><XO>${shadowPosX}</XO><YS>0</YS><YO>${shadowPosY}</YO></UDim2>`);
     }
     

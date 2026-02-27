@@ -167,7 +167,9 @@ async function main() {
           //
           // | Property              | Strip? | Reason                                    |
           // |-----------------------|--------|-------------------------------------------|
-          // | cornerRadius          | YES    | Roblox UICorner handles rounding           |
+          // | cornerRadius          | NO     | KEEP — PNG needs rounded corners to match  |
+          // |                       |        | Roblox UICorner, preventing sharp-cut      |
+          // |                       |        | stroke artifacts at corners                |
           // | DROP_SHADOW           | YES    | Transparent padding beyond frame           |
           // | LAYER_BLUR            | YES    | Blurs content beyond frame bounds          |
           // | INNER_SHADOW          | NO     | Renders inside — designed highlight        |
@@ -175,12 +177,8 @@ async function main() {
           // | stroke INSIDE         | NO     | Renders inside — designed card border      |
           // | stroke CENTER/OUTSIDE | YES    | Extends beyond frame bounds                |
 
-          // 1. CornerRadius → always strip (Roblox UICorner handles rounding)
-          if ('cornerRadius' in clone) clone.cornerRadius = 0;
-          if ('topLeftRadius' in clone) clone.topLeftRadius = 0;
-          if ('topRightRadius' in clone) clone.topRightRadius = 0;
-          if ('bottomLeftRadius' in clone) clone.bottomLeftRadius = 0;
-          if ('bottomRightRadius' in clone) clone.bottomRightRadius = 0;
+          // 1. CornerRadius → KEEP on clone (PNG renders with smooth rounded corners)
+          // Roblox UICorner clips to the same radius — result is clean smooth corners
 
           // 2. Effects → strip only OUTER effects (DROP_SHADOW, LAYER_BLUR)
           //    Keep INNER_SHADOW and BACKGROUND_BLUR (render inside frame)
@@ -215,10 +213,9 @@ async function main() {
         exportedImages[rasterKey] = uint8ToBase64(bytes);
 
         // ── SHADOW-ONLY CLONE: Export DROP_SHADOW as separate _Shadow PNG ──
-        // If original node has DROP_SHADOW effects AND is hybrid (container with BG),
-        // create a shadow-only clone: keep fills (for shape mask) + DROP_SHADOW only.
-        // Strip: children, strokes, INNER_SHADOW, BACKGROUND_BLUR, cornerRadius.
-        // The shadow PNG includes the expanded bounds from DROP_SHADOW.
+        // Clone node with fills + DROP_SHADOW effects. The fill area overlaps with
+        // the card's _BG (hidden behind it). Only the shadow blur that extends beyond
+        // the card bounds is visible. KEEP cornerRadius for proper rounded shadow shape.
         if (!isFlatten && 'children' in node && 'effects' in node && node.effects) {
           var hasDropShadow = false;
           for (var ei = 0; ei < node.effects.length; ei++) {
@@ -235,31 +232,49 @@ async function main() {
               shadowClone.resize(node.width, node.height);
               // Remove ALL children
               while (shadowClone.children.length > 0) shadowClone.children[0].remove();
-              // Strip cornerRadius (shadow PNG uses renderBounds for sizing)
-              if ('cornerRadius' in shadowClone) shadowClone.cornerRadius = 0;
-              if ('topLeftRadius' in shadowClone) shadowClone.topLeftRadius = 0;
-              if ('topRightRadius' in shadowClone) shadowClone.topRightRadius = 0;
-              if ('bottomLeftRadius' in shadowClone) shadowClone.bottomLeftRadius = 0;
-              if ('bottomRightRadius' in shadowClone) shadowClone.bottomRightRadius = 0;
+              // KEEP cornerRadius — shadow follows the rounded shape
+              // REPLACE all fills with single SOLID near-transparent fill.
+              // Why not opacity: 0.01 on each fill? Gradient fills still render their
+              // gradient stop colors at 0.01, making the fill visible and hiding the shadow.
+              // A single solid black at 0.004 (alpha ≈ 1/255) gives the shadow engine
+              // a shape to cast from while being completely imperceptible in the PNG.
+              shadowClone.fills = [{
+                type: 'SOLID',
+                color: { r: 0, g: 0, b: 0 },
+                opacity: 0.004,
+                visible: true
+              }];
               // Keep ONLY DROP_SHADOW effects — strip INNER_SHADOW, BACKGROUND_BLUR, LAYER_BLUR
               if ('effects' in shadowClone && shadowClone.effects) {
                 shadowClone.effects = shadowClone.effects.filter(function(e) {
                   return e.type === 'DROP_SHADOW';
                 });
               }
-              // Strip ALL strokes (shadow only needs shape from fills)
+              // Strip ALL strokes
               if ('strokes' in shadowClone) {
                 shadowClone.strokes = [];
                 if ('strokeWeight' in shadowClone) shadowClone.strokeWeight = 0;
               }
               await new Promise(function(r) { setTimeout(r, 50); });
+              // Capture render bounds BEFORE export to get shadow expansion offsets
+              // _renderBounds = how much the shadow extends beyond the node's own bounds
+              var cloneBB = shadowClone.absoluteBoundingBox;
+              var cloneRB = shadowClone.absoluteRenderBounds;
               var shadowBytes = await shadowClone.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
               shadowClone.remove();
               exportedImages[shadowKey] = uint8ToBase64(shadowBytes);
+              // Store render bounds on the IR node for the assembler to position the shadow
+              if (cloneBB && cloneRB) {
+                irNode._renderBounds = {
+                  x: cloneRB.x - cloneBB.x,  // shadow expansion left (e.g. -16)
+                  y: cloneRB.y - cloneBB.y,  // shadow expansion top (e.g. -8)
+                  width: cloneRB.width,
+                  height: cloneRB.height
+                };
+              }
             } catch(se) {
               // Non-fatal: shadow export failed, node will just have no shadow
             }
-          }
         }
       } catch(e) {
         notFound.push(rasterKey + ':err:' + String(e));
