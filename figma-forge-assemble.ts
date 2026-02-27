@@ -826,6 +826,56 @@ function emitContainerNode(
     lines.push(...promotedChildrenXml);
   }
 
+  // ── SHADOW SIBLING: Emit _Shadow ImageLabel as sibling (behind container) ──
+  // When a container has _shadowImageHash (from DROP_SHADOW in Figma), emit a separate
+  // ImageLabel BEFORE the container (prepended to output) that renders the shadow.
+  // The shadow PNG is sized to _renderBounds (includes shadow expansion beyond frame).
+  // This lives OUTSIDE ClipsDescendants, so the shadow renders beyond rounded corners.
+  const shadowAsset = (node as any)._resolvedShadowId as string | undefined;
+  if (shadowAsset && rb) {
+    const shadowRef = nextRef();
+    // Shadow position/size: _renderBounds capture the full shadow expansion
+    const shadowXO = Math.round(rb.x - node.x);
+    const shadowYO = Math.round(rb.y - node.y);
+    const shadowW = Math.round(rb.width);
+    const shadowH = Math.round(rb.height);
+    // Position relative to parent (offset from the container's position)
+    const containerPosXO = Math.round(node.x);
+    const containerPosYO = Math.round(node.y);
+    const shadowPosX = containerPosXO + shadowXO;
+    const shadowPosY = containerPosYO + shadowYO;
+    
+    const shadowLines: string[] = [
+      `<Item class="ImageLabel" referent="${shadowRef}">`,
+      `<Properties>`,
+      `<string name="Name">${escapeXmlAttr(node.name)}_Shadow</string>`,
+      `<bool name="Visible">true</bool>`,
+      `<int name="ZIndex">${Math.max(0, zIndex - 1)}</int>`,
+      `<int name="BorderSizePixel">0</int>`,
+      `<float name="BackgroundTransparency">1</float>`,
+    ];
+    
+    if (isRoot) {
+      // Root shadow: centered behind root frame, use scale-based positioning
+      shadowLines.push(`<UDim2 name="Position"><XS>0.5</XS><XO>${shadowXO}</XO><YS>0.5</YS><YO>${shadowYO}</YO></UDim2>`);
+      shadowLines.push(`<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`);
+    } else if (parentHasAutoLayout) {
+      // Auto-layout: shadow positioned absolutely (not managed by layout)
+      shadowLines.push(`<UDim2 name="Position"><XS>0</XS><XO>${shadowPosX}</XO><YS>0</YS><YO>${shadowPosY}</YO></UDim2>`);
+    } else {
+      shadowLines.push(`<UDim2 name="Position"><XS>0</XS><XO>${shadowPosX}</XO><YS>0</YS><YO>${shadowPosY}</YO></UDim2>`);
+    }
+    
+    shadowLines.push(`<UDim2 name="Size"><XS>0</XS><XO>${shadowW}</XO><YS>0</YS><YO>${shadowH}</YO></UDim2>`);
+    shadowLines.push(`<Content name="Image"><url>${shadowAsset}</url></Content>`);
+    shadowLines.push(`<token name="ScaleType">0</token>`); // Stretch
+    shadowLines.push(`</Properties>`);
+    shadowLines.push(`</Item>`);
+    
+    // PREPEND shadow before the container frame so it renders behind
+    return shadowLines.join('\n') + '\n' + lines.join('\n');
+  }
+
   return lines.join('\n');
 }
 

@@ -366,7 +366,12 @@ async function main() {
       if (hasVisualBackground && 'exportAsync' in node) {
         ir._rasterizedImageHash = 'raster_' + node.id.replace(/:/g, '_');
         rasterQueue.push({ irNode: ir, figmaNode: node });
-        console.log('[FigmaForge] Container+BG (will rasterize): ' + node.name + ' (' + node.id + ')');
+        // Check for DROP_SHADOW → tag for shadow clone export
+        if (ir.effects && ir.effects.some(function(e) { return e.type === 'DROP_SHADOW' && e.visible !== false; })) {
+          ir._shadowImageHash = 'shadow_' + node.id.replace(/:/g, '_');
+          unresolvedImages.push(ir._shadowImageHash);
+        }
+        console.log('[FigmaForge] Container+BG (will rasterize): ' + node.name + ' (' + node.id + ')' + (ir._shadowImageHash ? ' [+shadow]' : ''));
       } else {
         console.log('[FigmaForge] Container (no-bg): ' + node.name + ' (' + node.id + ')');
       }
@@ -521,6 +526,55 @@ async function main() {
         const hash = irNode._rasterizedImageHash;
         exportedImages[hash] = uint8ToBase64(pngBytes);
         console.log('[FigmaForge] Rasterized ' + (irNode._isHybrid ? 'HYBRID' : 'ATOM') + ': ' + figmaNode.name + ' (' + figmaNode.id + ')');
+
+        // ── SHADOW-ONLY CLONE: Export DROP_SHADOW as separate _Shadow PNG ──
+        // If hybrid node has DROP_SHADOW effects, create a shadow-only clone:
+        // keep fills (for shape mask) + DROP_SHADOW only.
+        // Strip: children, strokes, INNER_SHADOW, BACKGROUND_BLUR, cornerRadius.
+        if (irNode._isHybrid && 'effects' in figmaNode && figmaNode.effects) {
+          var hasDropShadow = false;
+          for (var sei = 0; sei < figmaNode.effects.length; sei++) {
+            if (figmaNode.effects[sei].type === 'DROP_SHADOW' && figmaNode.effects[sei].visible !== false) {
+              hasDropShadow = true;
+              break;
+            }
+          }
+          if (hasDropShadow) {
+            var shadowHash = 'shadow_' + figmaNode.id.replace(/:/g, '_');
+            try {
+              var shadowClone = figmaNode.clone();
+              if ('layoutMode' in shadowClone) shadowClone.layoutMode = 'NONE';
+              shadowClone.resize(figmaNode.width, figmaNode.height);
+              while (shadowClone.children.length > 0) shadowClone.children[0].remove();
+              // Strip cornerRadius
+              if ('cornerRadius' in shadowClone) shadowClone.cornerRadius = 0;
+              if ('topLeftRadius' in shadowClone) shadowClone.topLeftRadius = 0;
+              if ('topRightRadius' in shadowClone) shadowClone.topRightRadius = 0;
+              if ('bottomLeftRadius' in shadowClone) shadowClone.bottomLeftRadius = 0;
+              if ('bottomRightRadius' in shadowClone) shadowClone.bottomRightRadius = 0;
+              // Keep ONLY DROP_SHADOW effects
+              if ('effects' in shadowClone && shadowClone.effects) {
+                shadowClone.effects = shadowClone.effects.filter(function(e) {
+                  return e.type === 'DROP_SHADOW';
+                });
+              }
+              // Strip ALL strokes
+              if ('strokes' in shadowClone) {
+                shadowClone.strokes = [];
+                if ('strokeWeight' in shadowClone) shadowClone.strokeWeight = 0;
+              }
+              await new Promise(function(resolve) { return setTimeout(resolve, 50); });
+              var shadowPng = await shadowClone.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
+              shadowClone.remove();
+              exportedImages[shadowHash] = uint8ToBase64(shadowPng);
+              irNode._shadowImageHash = shadowHash;
+              unresolvedImages.push(shadowHash);
+              console.log('[FigmaForge] Shadow clone exported: ' + figmaNode.name + ' → ' + shadowHash);
+            } catch (shadowErr) {
+              console.warn('[FigmaForge] Shadow clone failed for ' + figmaNode.name + ': ' + shadowErr.message);
+            }
+          }
+        }
       } catch (err) {
         console.error('[FigmaForge] FAILED to rasterize ' + figmaNode.name + ': ' + err.message);
       }

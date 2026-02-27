@@ -213,6 +213,54 @@ async function main() {
         }
         
         exportedImages[rasterKey] = uint8ToBase64(bytes);
+
+        // ── SHADOW-ONLY CLONE: Export DROP_SHADOW as separate _Shadow PNG ──
+        // If original node has DROP_SHADOW effects AND is hybrid (container with BG),
+        // create a shadow-only clone: keep fills (for shape mask) + DROP_SHADOW only.
+        // Strip: children, strokes, INNER_SHADOW, BACKGROUND_BLUR, cornerRadius.
+        // The shadow PNG includes the expanded bounds from DROP_SHADOW.
+        if (!isFlatten && 'children' in node && 'effects' in node && node.effects) {
+          var hasDropShadow = false;
+          for (var ei = 0; ei < node.effects.length; ei++) {
+            if (node.effects[ei].type === 'DROP_SHADOW' && node.effects[ei].visible !== false) {
+              hasDropShadow = true;
+              break;
+            }
+          }
+          if (hasDropShadow) {
+            var shadowKey = 'shadow_' + node.id.replace(/:/g, '_');
+            try {
+              var shadowClone = node.clone();
+              if ('layoutMode' in shadowClone) shadowClone.layoutMode = 'NONE';
+              shadowClone.resize(node.width, node.height);
+              // Remove ALL children
+              while (shadowClone.children.length > 0) shadowClone.children[0].remove();
+              // Strip cornerRadius (shadow PNG uses renderBounds for sizing)
+              if ('cornerRadius' in shadowClone) shadowClone.cornerRadius = 0;
+              if ('topLeftRadius' in shadowClone) shadowClone.topLeftRadius = 0;
+              if ('topRightRadius' in shadowClone) shadowClone.topRightRadius = 0;
+              if ('bottomLeftRadius' in shadowClone) shadowClone.bottomLeftRadius = 0;
+              if ('bottomRightRadius' in shadowClone) shadowClone.bottomRightRadius = 0;
+              // Keep ONLY DROP_SHADOW effects — strip INNER_SHADOW, BACKGROUND_BLUR, LAYER_BLUR
+              if ('effects' in shadowClone && shadowClone.effects) {
+                shadowClone.effects = shadowClone.effects.filter(function(e) {
+                  return e.type === 'DROP_SHADOW';
+                });
+              }
+              // Strip ALL strokes (shadow only needs shape from fills)
+              if ('strokes' in shadowClone) {
+                shadowClone.strokes = [];
+                if ('strokeWeight' in shadowClone) shadowClone.strokeWeight = 0;
+              }
+              await new Promise(function(r) { setTimeout(r, 50); });
+              var shadowBytes = await shadowClone.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
+              shadowClone.remove();
+              exportedImages[shadowKey] = uint8ToBase64(shadowBytes);
+            } catch(se) {
+              // Non-fatal: shadow export failed, node will just have no shadow
+            }
+          }
+        }
       } catch(e) {
         notFound.push(rasterKey + ':err:' + String(e));
       }

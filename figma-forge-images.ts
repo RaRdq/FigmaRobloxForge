@@ -294,18 +294,23 @@ function collectImageNodes(node: FigmaForgeNode, results: FigmaForgeNode[]): voi
   }
 }
 
-/** Apply resolved IDs to all nodes matching an imageHash, rasterizedImageHash, or _imageKey */
+/** Apply resolved IDs to all nodes matching an imageHash, rasterizedImageHash, _imageKey, or _shadowImageHash */
 function applyResolvedId(node: FigmaForgeNode, imageHash: string, assetId: string): void {
   const hasMatch = (node.fills ?? []).some(f => f.type === 'IMAGE' && f.visible && f.imageHash === imageHash);
   const hasRasterMatch = node._rasterizedImageHash === imageHash;
   // Turbo extract sets _imageKey instead of _rasterizedImageHash
   const hasImageKeyMatch = (node as any)._imageKey === imageHash;
+  // Shadow export: shadow_ prefix matches _shadowImageHash
+  const hasShadowMatch = (node as any)._shadowImageHash === imageHash;
   if (hasMatch || hasRasterMatch || hasImageKeyMatch) {
     node._resolvedImageId = `rbxassetid://${assetId}`;
     // Also backfill _rasterizedImageHash so classifyNode sees it as rasterized
     if (!node._rasterizedImageHash && hasImageKeyMatch) {
       node._rasterizedImageHash = imageHash;
     }
+  }
+  if (hasShadowMatch) {
+    (node as any)._resolvedShadowId = `rbxassetid://${assetId}`;
   }
   if (node.children) {
     for (const child of node.children) {
@@ -317,18 +322,20 @@ function applyResolvedId(node: FigmaForgeNode, imageHash: string, assetId: strin
 // ─── Raster Hash Backfill ────────────────────────────────────────
 
 /**
- * Pre-pass: backfill `_rasterizedImageHash` on IR nodes whose IDs match
- * `raster_{nodeId}` keys in `unresolvedImages`.
+ * Pre-pass: backfill `_rasterizedImageHash` and `_shadowImageHash` on IR nodes
+ * whose IDs match `raster_{nodeId}` / `shadow_{nodeId}` keys in `unresolvedImages`.
  *
  * The extraction step generates `raster_52_480` keys (nodeId `52:480` with
- * `:` → `_`), but doesn't set `_rasterizedImageHash` on the IR node.
+ * `:` → `_`), but doesn't always set the hash on the IR node.
  * Without this, `applyResolvedId` can never match uploaded assets to nodes.
  */
 function backfillRasterHashes(root: FigmaForgeNode, unresolvedImages: string[], verbose: boolean): number {
   const RASTER_PREFIX = 'raster_';
-  const unresolvedSet = new Set(unresolvedImages.filter(k => k.startsWith(RASTER_PREFIX)));
+  const SHADOW_PREFIX = 'shadow_';
+  const rasterSet = new Set(unresolvedImages.filter(k => k.startsWith(RASTER_PREFIX)));
+  const shadowSet = new Set(unresolvedImages.filter(k => k.startsWith(SHADOW_PREFIX)));
   
-  if (unresolvedSet.size === 0) return 0;
+  if (rasterSet.size === 0 && shadowSet.size === 0) return 0;
 
   let patched = 0;
   function walk(node: FigmaForgeNode): void {
@@ -338,15 +345,23 @@ function backfillRasterHashes(root: FigmaForgeNode, unresolvedImages: string[], 
       if (node.id) {
         rasterKey = RASTER_PREFIX + node.id.replace(':', '_');
       }
-      if (!rasterKey || !unresolvedSet.has(rasterKey)) {
+      if (!rasterKey || !rasterSet.has(rasterKey)) {
         // Turbo extract sets _imageKey directly on nodes
         const imageKey = (node as any)._imageKey;
-        if (imageKey && unresolvedSet.has(imageKey)) {
+        if (imageKey && rasterSet.has(imageKey)) {
           rasterKey = imageKey;
         }
       }
-      if (rasterKey && unresolvedSet.has(rasterKey)) {
+      if (rasterKey && rasterSet.has(rasterKey)) {
         node._rasterizedImageHash = rasterKey;
+        patched++;
+      }
+    }
+    // Backfill _shadowImageHash for shadow_ prefixed unresolved images
+    if (!(node as any)._shadowImageHash && node.id) {
+      const shadowKey = SHADOW_PREFIX + node.id.replace(':', '_');
+      if (shadowSet.has(shadowKey)) {
+        (node as any)._shadowImageHash = shadowKey;
         patched++;
       }
     }
@@ -356,7 +371,7 @@ function backfillRasterHashes(root: FigmaForgeNode, unresolvedImages: string[], 
   }
   walk(root);
 
-  if (verbose) console.log(`[FigmaForge] ♻️  Backfilled _rasterizedImageHash on ${patched}/${unresolvedSet.size} nodes`);
+  if (verbose) console.log(`[FigmaForge] ♻️  Backfilled raster/shadow hashes on ${patched} nodes`);
   return patched;
 }
 
