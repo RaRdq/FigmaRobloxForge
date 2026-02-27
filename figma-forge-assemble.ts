@@ -209,6 +209,7 @@ function emitNode(
   parentHasAutoLayout: boolean = false,
   parentWidth: number = 0,
   parentHeight: number = 0,
+  parentCornerRadius: number = 0,
 ): string {
   if (!node) return '';
   if (node._isStrokeDuplicate) return '';
@@ -217,7 +218,7 @@ function emitNode(
 
   switch (strategy) {
     case 'png':
-      return emitPngNode(node, zIndex, isRoot, parentHasAutoLayout, parentWidth, parentHeight, config);
+      return emitPngNode(node, zIndex, isRoot, parentHasAutoLayout, parentWidth, parentHeight, config, parentCornerRadius);
     case 'text_dynamic':
       return emitDynamicTextNode(node, config, zIndex, parentHasAutoLayout, parentWidth, parentHeight);
     case 'container':
@@ -241,6 +242,7 @@ function emitPngNode(
   parentWidth: number = 0,
   parentHeight: number = 0,
   config?: RuntimeConfig,
+  parentCornerRadius: number = 0,
 ): string {
   const ref = nextRef();
   const rb = node._renderBounds;
@@ -315,6 +317,34 @@ function emitPngNode(
   // the _Interact overlay. But interactive ones (e.g. CloseBtn) need clickable overlays.
   if (config && (node as any)._isFlattened && isInteractive(node.name, config)) {
     lines.push(emitInteractiveOverlay(node.name, zIndex));
+  }
+
+  // ── GENERIC RULE: Propagate UICorner from parent to edge-touching PNG children ──
+  // Roblox ClipsDescendants clips RECTANGULARLY, not to rounded UICorner.
+  // ImageLabels near parent edges (like InnerShine, glow overlays) show sharp corners
+  // poking beyond the parent's rounded corners. Fix: add UICorner to edge-hugging PNGs.
+  if (parentCornerRadius > 0 && !isRoot) {
+    const nx = Math.round(node.x);
+    const ny = Math.round(node.y);
+    const nw = Math.round(effectiveW);
+    const nh = Math.round(effectiveH);
+    const pw = Math.round(parentWidth);
+    const ph = Math.round(parentHeight);
+    // Check if the node hugs the parent's edges (within 5px tolerance)
+    const touchesLeft = nx <= 5;
+    const touchesTop = ny <= 5;
+    const touchesRight = pw > 0 && (nx + nw >= pw - 5);
+    const touchesBottom = ph > 0 && (ny + nh >= ph - 5);
+    const isWide = pw > 0 && nw >= pw * 0.85;
+    const isTall = ph > 0 && nh >= ph * 0.85;
+    // Add UICorner if the node spans most of one dimension AND touches corners
+    if ((isWide && (touchesLeft || touchesRight)) || (isTall && (touchesTop || touchesBottom))) {
+      const crRef = nextRef();
+      const cr = Math.round(parentCornerRadius);
+      lines.push(`<Item class="UICorner" referent="${crRef}"><Properties>`);
+      lines.push(`<UDim name="CornerRadius"><S>0</S><O>${cr}</O></UDim>`);
+      lines.push(`</Properties></Item>`);
+    }
   }
 
   lines.push(`</Item>`);
@@ -774,7 +804,7 @@ function emitContainerNode(
         }
       }
 
-      lines.push(emitNode(child, config, childZ, false, thisHasAutoLayout, node.width, node.height));
+      lines.push(emitNode(child, config, childZ, false, thisHasAutoLayout, node.width, node.height, parentCr));
     });
   }
 
