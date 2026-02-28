@@ -400,9 +400,11 @@ function emitDynamicTextNode(
   const rawWeight = ts?.fontWeight ?? (ts?.style ? styleToWeight[ts.style] : undefined) ?? node.fontWeight ?? 400;
   const fontWeight = Number.isFinite(Number(rawWeight)) ? Math.round(Number(rawWeight) / 100) * 100 : 400;
   // Text color: support turbo extract fillR/G/B on textStyle, and standard fills array
+  // Falls back to _gradientDominantColor (from gradient text extraction) then white
   const textColor = (ts?.fillR !== undefined)
     ? { r: ts.fillR, g: ts.fillG ?? 0, b: ts.fillB ?? 0, a: ts.fillOpacity ?? 1 }
     : node.fills?.find(f => f.visible && f.type === 'SOLID')?.color
+      ?? (node as any)._gradientDominantColor
       ?? { r: 1, g: 1, b: 1, a: 1 };
 
   // Roblox TextXAlignment tokens: Left=0, Right=1, Center=2

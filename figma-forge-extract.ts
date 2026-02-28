@@ -353,12 +353,41 @@ async function main() {
         console.log('[FigmaForge] [Flatten] PNG slice: ' + node.name + ' (' + node.id + ')');
       }
     } else if (node.type === 'TEXT') {
-      // ALL text → TextLabel. Never rasterize text as PNG — game code expects .Text
-      ir._isDynamic = true;
-      if (typeof isDynText === 'function' && isDynText(node)) {
-        ir._isDynamicPattern = true; // Mark for $ prefix in assembler
+      // ── TEXT CLASSIFICATION: Gradient-aware ──
+      // Gradient fills on text can't be rendered by Roblox TextLabel.
+      // Static gradient text → rasterize as PNG (pixel-perfect Figma match)
+      // Dynamic gradient text → TextLabel with dominant gradient color fallback
+      var textHasGradient = visibleFills.some(function(f) { return f.type && f.type.startsWith('GRADIENT_'); });
+      var isDynamicText = typeof isDynText === 'function' && isDynText(node);
+      
+      if (textHasGradient && !isDynamicText) {
+        // Static gradient text → export as PNG ImageLabel (preserves golden/gradient visual)
+        ir._isFlattened = true;
+        if ('exportAsync' in node) {
+          ir._rasterizedImageHash = 'raster_' + node.id.replace(/:/g, '_');
+          rasterQueue.push({ irNode: ir, figmaNode: node });
+        }
+        console.log('[FigmaForge] TEXT→PNG (gradient, static): ' + node.name + ' (' + node.id + ')');
+      } else {
+        // Normal text or dynamic gradient text → TextLabel
+        ir._isDynamic = true;
+        if (isDynamicText) {
+          ir._isDynamicPattern = true;
+        }
+        // For dynamic text with gradient: extract dominant gradient color
+        if (textHasGradient && isDynamicText) {
+          var gradientFill = visibleFills.find(function(f) { return f.type && f.type.startsWith('GRADIENT_'); });
+          if (gradientFill && gradientFill.gradientStops && gradientFill.gradientStops.length > 0) {
+            // Use the midpoint color of the gradient as the dominant color
+            var midIdx = Math.floor(gradientFill.gradientStops.length / 2);
+            var midColor = gradientFill.gradientStops[midIdx].color;
+            ir._gradientDominantColor = serializeColor(midColor);
+          }
+          console.log('[FigmaForge] TEXT→TextLabel (gradient, dynamic): ' + node.name + ' (' + node.id + ')');
+        } else {
+          console.log('[FigmaForge] TEXT→TextLabel: ' + node.name + ' (' + node.id + ')');
+        }
       }
-      console.log('[FigmaForge] TEXT→TextLabel: ' + node.name + ' (' + node.id + ')');
     } else if (hasChildren) {
       // Frame with children → CONTAINER (preserves hierarchy)
       // Any visible fill/stroke → _isHybrid → _BG ImageLabel from rasterized PNG
