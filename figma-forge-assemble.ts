@@ -857,53 +857,91 @@ function emitContainerNode(
     lines.push(...promotedChildrenXml);
   }
 
-  // ── SHADOW SIBLING: Emit _Shadow ImageLabel as sibling (behind container) ──
+  // ── SHADOW: Emit _Shadow ImageLabel for drop shadow effect ──
   // When a container has _shadowImageHash (from DROP_SHADOW in Figma), emit a separate
-  // ImageLabel BEFORE the container (prepended to output) that renders the shadow.
-  // The shadow PNG is sized to _renderBounds (includes shadow expansion beyond frame).
-  // This lives OUTSIDE ClipsDescendants, so the shadow renders beyond rounded corners.
+  // ImageLabel that renders the shadow PNG (sized to _renderBounds).
+  //
+  // CRITICAL FIX: When the PARENT has auto-layout (UIListLayout), emitting the shadow
+  // as a sibling causes it to be managed by the layout — it gets positioned as a layout
+  // item instead of staying behind the target node. In this case, emit the shadow as a
+  // CHILD of this container (centered behind it at ZIndex=0) so it's excluded from
+  // the parent's auto-layout.
   const shadowAsset = (node as any)._resolvedShadowId as string | undefined;
   if (shadowAsset && rb) {
     const shadowRef = nextRef();
-    // _renderBounds from tree extraction stores ADJUSTED positions:
-    //   rb.x = ir.x - extraLeft  (node position minus shadow expansion)
-    //   rb.y = ir.y - extraTop   (node position minus shadow expansion)
-    // These ARE the final shadow positions relative to the parent — no need to add node.x/y again.
-    const shadowW = Math.round(rb.width);
-    const shadowH = Math.round(rb.height);
+    // Figma's absoluteRenderBounds captures the FULL Gaussian blur extent (3σ).
+    // The outermost pixels are nearly invisible but inflate the shadow size dramatically.
+    // Scale expansion to 50% to keep only the visually meaningful shadow portion.
+    // This matches Figma's subtle shadow appearance in Roblox.
+    const SHADOW_SCALE = 0.5; // 50% of render bounds expansion
+    const expansionW = rb.width - node.width;
+    const expansionH = rb.height - node.height;
+    const shadowW = Math.round(node.width + expansionW * SHADOW_SCALE);
+    const shadowH = Math.round(node.height + expansionH * SHADOW_SCALE);
     
     const shadowLines: string[] = [
       `<Item class="ImageLabel" referent="${shadowRef}">`,
       `<Properties>`,
       `<string name="Name">${escapeXmlAttr(node.name)}_Shadow</string>`,
       `<bool name="Visible">true</bool>`,
-      `<int name="ZIndex">${Math.max(0, zIndex - 1)}</int>`,
       `<int name="BorderSizePixel">0</int>`,
       `<float name="BackgroundTransparency">1</float>`,
+      // Roblox renders shadow PNGs more prominently than Figma's native alpha compositing.
+      // ImageTransparency softens the shadow to match Figma's subtle drop shadow appearance.
+      `<float name="ImageTransparency">0.3</float>`,
     ];
     
-    if (isRoot) {
+    if (parentHasAutoLayout && !isRoot) {
+      // ── AUTO-LAYOUT PARENT: Emit shadow as CHILD of this container ──
+      // Center the shadow behind the container using AnchorPoint(0.5, 0.5).
+      // Size uses render bounds expansion relative to node size.
+      // ZIndex=0 places it behind all children (which start at 1+).
+      shadowLines.push(`<int name="ZIndex">0</int>`);
+      shadowLines.push(`<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`);
+      shadowLines.push(`<UDim2 name="Position"><XS>0.5</XS><XO>0</XO><YS>0.5</YS><YO>0</YO></UDim2>`);
+      shadowLines.push(`<UDim2 name="Size"><XS>0</XS><XO>${shadowW}</XO><YS>0</YS><YO>${shadowH}</YO></UDim2>`);
+      shadowLines.push(`<Content name="Image"><url>${shadowAsset}</url></Content>`);
+      shadowLines.push(`<token name="ScaleType">0</token>`);
+      shadowLines.push(`</Properties>`);
+      shadowLines.push(`</Item>`);
+      // INSERT shadow as first child INSIDE the container (after </Properties>)
+      // Find the </Properties> close tag and inject after it
+      const propsCloseIdx = lines.indexOf(`</Properties>`);
+      if (propsCloseIdx >= 0) {
+        lines.splice(propsCloseIdx + 1, 0, ...shadowLines);
+      }
+    } else if (isRoot) {
       // Root shadow: centered behind root frame, use scale-based positioning
-      // For root, compute pure expansion offset: rb.x - node.x = -extraLeft
-      const rootExpX = Math.round(rb.x - node.x);
-      const rootExpY = Math.round(rb.y - node.y);
+      // Scale the expansion offset to match the reduced shadow size
+      shadowLines.push(`<int name="ZIndex">${Math.max(0, zIndex - 1)}</int>`);
+      const rootExpX = Math.round((rb.x - node.x) * SHADOW_SCALE);
+      const rootExpY = Math.round((rb.y - node.y) * SHADOW_SCALE);
       shadowLines.push(`<UDim2 name="Position"><XS>0.5</XS><XO>${rootExpX}</XO><YS>0.5</YS><YO>${rootExpY}</YO></UDim2>`);
       shadowLines.push(`<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`);
+      shadowLines.push(`<UDim2 name="Size"><XS>0</XS><XO>${shadowW}</XO><YS>0</YS><YO>${shadowH}</YO></UDim2>`);
+      shadowLines.push(`<Content name="Image"><url>${shadowAsset}</url></Content>`);
+      shadowLines.push(`<token name="ScaleType">0</token>`);
+      shadowLines.push(`</Properties>`);
+      shadowLines.push(`</Item>`);
+      // PREPEND shadow before the container frame so it renders behind
+      return shadowLines.join('\n') + '\n' + lines.join('\n');
     } else {
-      // Non-root: rb.x/y already includes node position — use directly
-      const shadowPosX = Math.round(rb.x);
-      const shadowPosY = Math.round(rb.y);
+      // Non-auto-layout parent: emit as sibling (original behavior)
+      // Compute centered position with scaled expansion
+      shadowLines.push(`<int name="ZIndex">${Math.max(0, zIndex - 1)}</int>`);
+      const halfExpW = (shadowW - node.width) / 2;
+      const halfExpH = (shadowH - node.height) / 2;
+      const shadowPosX = Math.round(node.x - halfExpW);
+      const shadowPosY = Math.round(node.y - halfExpH);
       shadowLines.push(`<UDim2 name="Position"><XS>0</XS><XO>${shadowPosX}</XO><YS>0</YS><YO>${shadowPosY}</YO></UDim2>`);
+      shadowLines.push(`<UDim2 name="Size"><XS>0</XS><XO>${shadowW}</XO><YS>0</YS><YO>${shadowH}</YO></UDim2>`);
+      shadowLines.push(`<Content name="Image"><url>${shadowAsset}</url></Content>`);
+      shadowLines.push(`<token name="ScaleType">0</token>`);
+      shadowLines.push(`</Properties>`);
+      shadowLines.push(`</Item>`);
+      // PREPEND shadow before the container frame so it renders behind
+      return shadowLines.join('\n') + '\n' + lines.join('\n');
     }
-    
-    shadowLines.push(`<UDim2 name="Size"><XS>0</XS><XO>${shadowW}</XO><YS>0</YS><YO>${shadowH}</YO></UDim2>`);
-    shadowLines.push(`<Content name="Image"><url>${shadowAsset}</url></Content>`);
-    shadowLines.push(`<token name="ScaleType">0</token>`); // Stretch
-    shadowLines.push(`</Properties>`);
-    shadowLines.push(`</Item>`);
-    
-    // PREPEND shadow before the container frame so it renders behind
-    return shadowLines.join('\n') + '\n' + lines.join('\n');
   }
 
   return lines.join('\n');
