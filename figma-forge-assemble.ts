@@ -253,7 +253,27 @@ function emitPngNode(
   const assetId = node._resolvedImageId || '';
   const hasImage = !!assetId;
 
-  const [posXml, sizeXml, anchorXml] = emitGeometry(node, isRoot, parentHasAutoLayout, parentWidth, parentHeight, Math.round(effectiveW), Math.round(effectiveH));
+  // ── CRITICAL FIX: Use logical node dimensions for constraint geometry ──
+  // When constraints (STRETCH, CENTER, SCALE) are applied, the geometry calculation
+  // needs the LOGICAL node size (node.width/height), NOT render bounds (which include
+  // glow/shadow expansion). Using render bounds with STRETCH produces:
+  //   Size = {1, renderW - parentW} = {1, 12} → 12px wider than parent (WRONG)
+  // Using node bounds with STRETCH produces:
+  //   Size = {1, nodeW - parentW} = {1, 0} → exact parent width (CORRECT)
+  //
+  // Render bounds are ONLY correct for MIN constraint (absolute positioning)
+  // where the PNG needs to display effects at their full expanded size.
+  const hc = node.constraints?.horizontal ?? 'MIN';
+  const vc = node.constraints?.vertical ?? 'MIN';
+  const isStretchOrCenter = (name: string) => name === 'STRETCH' || name === 'CENTER' || name === 'SCALE' || name === 'MAX';
+  // Also check for forced overrides (e.g. TitleBar → STRETCH)
+  const forcedStretchH = node.name === 'TitleBar' || node.name === '[Flatten] TitleBar';
+  const useNodeW = isStretchOrCenter(hc) || forcedStretchH;
+  const useNodeH = isStretchOrCenter(vc);
+  const geoW = useNodeW ? Math.round(node.width) : Math.round(effectiveW);
+  const geoH = useNodeH ? Math.round(node.height) : Math.round(effectiveH);
+
+  const [posXml, sizeXml, anchorXml] = emitGeometry(node, isRoot, parentHasAutoLayout, parentWidth, parentHeight, geoW, geoH);
 
   // Always use ImageLabel — it supports both Image AND BackgroundColor3.
   // Frame does NOT support Image/ScaleType, so solid-fill nodes must also be ImageLabel.
@@ -595,12 +615,18 @@ function emitContainerNode(
     lines.push(`<Vector2 name="AnchorPoint"><X>0.5</X><Y>0.5</Y></Vector2>`);
   }
   if (isRoot) {
-    // ── GENERIC RULE: Root containers with rounded corners force ClipsDescendants=true ──
-    // Figma may set clipsContent=false on sections, but children like TitleBar extend to
-    // full width and poke out at UICorner rounded edges. Force clipping when corners are rounded.
-    const hasRoundedCorners = typeof node.cornerRadius === 'number' ? node.cornerRadius > 0
-      : (Array.isArray(node.cornerRadius) ? node.cornerRadius.some((r: number) => r > 0) : false);
-    const rootClips = hasRoundedCorners || !!node.clipsContent;
+    // ── GENERIC RULE: Root containers respect Figma's clipsContent property ──
+    // CRITICAL FIX: Previously forced ClipsDescendants=true when corners were rounded,
+    // ignoring Figma's clipsContent=false. This clipped TitleBar glow, CloseBtn at edges,
+    // and shadow effects across ALL modals (required 5+ manual overrides in wiring code).
+    //
+    // Why rounded corners DON'T need ClipsDescendants:
+    //   1. _BG ImageLabel already has its own UICorner (lines 699-713) for visual rounding
+    //   2. Roblox ClipsDescendants clips RECTANGULARLY, not to rounded UICorner shapes
+    //   3. Elements like CloseBtn, TitleBar glow intentionally extend beyond the root frame
+    //
+    // Only clip when Figma explicitly sets clipsContent=true.
+    const rootClips = !!node.clipsContent;
     lines.push(`<bool name="ClipsDescendants">${rootClips}</bool>`);
   }
 
