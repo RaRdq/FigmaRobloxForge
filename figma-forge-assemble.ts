@@ -133,12 +133,8 @@ function emitGeometry(
   let hc = node.constraints?.horizontal ?? 'MIN';
   let vc = node.constraints?.vertical ?? 'MIN';
 
-  // --- SOW_UI_AAA Layout Overrides ---
-  // 1. Force TitleBar to stretch across the full width of the Modal
-  if (node.name === 'TitleBar') {
-    hc = 'STRETCH';
-  }
-  // 2. Buy Buttons need their internal TextLabels perfectly centered
+  // --- Layout Overrides (generic pattern matching) ---
+  // Buy Buttons internal TextLabels should be centered when not in auto-layout
   if (node.type === 'TEXT' && (node as any).parent?.name?.includes('Btn') && !parentHasAutoLayout) {
     hc = 'CENTER';
     vc = 'CENTER';
@@ -246,34 +242,66 @@ function emitPngNode(
 ): string {
   const ref = nextRef();
   const rb = node._renderBounds;
-  const effectiveW = rb ? rb.width : node.width;
-  const effectiveH = rb ? rb.height : node.height;
+  const isFlattened = !!(node as any)._isFlattened;
 
   // Determine the image asset ID
   const assetId = node._resolvedImageId || '';
   const hasImage = !!assetId;
 
-  // ── CRITICAL FIX: Use logical node dimensions for constraint geometry ──
-  // When constraints (STRETCH, CENTER, SCALE) are applied, the geometry calculation
-  // needs the LOGICAL node size (node.width/height), NOT render bounds (which include
-  // glow/shadow expansion). Using render bounds with STRETCH produces:
-  //   Size = {1, renderW - parentW} = {1, 12} → 12px wider than parent (WRONG)
-  // Using node bounds with STRETCH produces:
-  //   Size = {1, nodeW - parentW} = {1, 0} → exact parent width (CORRECT)
+  // ── ARCHITECTURAL FIX: Render bounds sizing for PNG nodes ──
   //
-  // Render bounds are ONLY correct for MIN constraint (absolute positioning)
-  // where the PNG needs to display effects at their full expanded size.
-  const hc = node.constraints?.horizontal ?? 'MIN';
-  const vc = node.constraints?.vertical ?? 'MIN';
-  const isStretchOrCenter = (name: string) => name === 'STRETCH' || name === 'CENTER' || name === 'SCALE' || name === 'MAX';
-  // Also check for forced overrides (e.g. TitleBar → STRETCH)
-  const forcedStretchH = node.name === 'TitleBar' || node.name === '[Flatten] TitleBar';
-  const useNodeW = isStretchOrCenter(hc) || forcedStretchH;
-  const useNodeH = isStretchOrCenter(vc);
-  const geoW = useNodeW ? Math.round(node.width) : Math.round(effectiveW);
-  const geoH = useNodeH ? Math.round(node.height) : Math.round(effectiveH);
+  // Problem: exportAsync captures PNGs at absoluteRenderBounds (includes shadow/glow).
+  // If the ImageLabel is sized to node.width but the PNG is wider (render bounds),
+  // ScaleType=Stretch COMPRESSES the content, making it visually smaller than Figma.
+  //
+  // Two distinct strategies based on node type:
+  //
+  // 1. [Flatten] nodes: shadows are BAKED INTO the PNG (not stripped).
+  //    The ImageLabel MUST be sized to render bounds so the PNG displays at 1:1.
+  //    Position is offset by (rbX - nodeX, rbY - nodeY) so the visual content
+  //    aligns with where Figma placed the node.
+  //    For STRETCH: full-width nodes that span the parent get
+  //      Size = {1, rbPaddingH} where rbPaddingH = rbW - nodeW (shadow overflow)
+  //      Position = {0, rbOffsetX} (negative offset for left shadow)
+  //    For FILL (auto-layout): similar render bounds expansion + offset.
+  //    For MIN (absolute): render bounds dimensions at offset position.
+  //
+  // 2. Non-flattened nodes (_BG hybrids, regular PNGs): shadows ARE stripped
+  //    during clone+strip pipeline. PNG matches node.width/height exactly.
+  //    Use node.width for ALL constraint types.
+  //
+  // This replaces the previous per-node-name overrides (TitleBar hardcode)
+  // with a generic rule that works for ANY [Flatten] or non-[Flatten] node.
 
-  const [posXml, sizeXml, anchorXml] = emitGeometry(node, isRoot, parentHasAutoLayout, parentWidth, parentHeight, geoW, geoH);
+  let geoW: number;
+  let geoH: number;
+  let posOffsetX = 0;  // Extra X offset for render bounds shadow padding
+  let posOffsetY = 0;  // Extra Y offset for render bounds shadow padding
+
+  if (isFlattened && rb) {
+    // [Flatten] strategy: PNG is at render bounds size
+    geoW = Math.round(rb.width);
+    geoH = Math.round(rb.height);
+    // Position offset: aligns visual content with Figma node placement
+    // rb.x is in parent-relative coords (same as node.x), offset = rb.x - node.x
+    posOffsetX = Math.round(rb.x - node.x);  // Typically negative (shadow extends left)
+    posOffsetY = Math.round(rb.y - node.y);  // Typically negative (shadow extends up)
+  } else {
+    // Non-flattened strategy: PNG matches node dimensions (shadows stripped)
+    geoW = Math.round(node.width);
+    geoH = Math.round(rb && !node._isHybrid ? rb.height : node.height);
+  }
+
+  // For auto-layout children, emitGeometry handles FILL/HUG sizing.
+  // For [Flatten] in auto-layout, we need to pass render bounds AND offset.
+  // For absolute (MIN constraint), we pass render bounds directly.
+  const adjustedNode = isFlattened && rb ? {
+    ...node,
+    x: node.x + posOffsetX,  // Shift position for shadow offset
+    y: node.y + posOffsetY,
+  } : node;
+
+  const [posXml, sizeXml, anchorXml] = emitGeometry(adjustedNode, isRoot, parentHasAutoLayout, parentWidth, parentHeight, geoW, geoH);
 
   // Always use ImageLabel — it supports both Image AND BackgroundColor3.
   // Frame does NOT support Image/ScaleType, so solid-fill nodes must also be ImageLabel.
@@ -343,11 +371,15 @@ function emitPngNode(
   // Roblox ClipsDescendants clips RECTANGULARLY, not to rounded UICorner.
   // ImageLabels near parent edges (like InnerShine, glow overlays) show sharp corners
   // poking beyond the parent's rounded corners. Fix: add UICorner to edge-hugging PNGs.
-  if (parentCornerRadius > 0 && !isRoot) {
+  //
+  // EXCEPTION: [Flatten] nodes already have rounded corners BAKED INTO the PNG from
+  // Figma's exportAsync. Adding UICorner double-clips the PNG, creating visible gaps
+  // at edges (most noticeable on full-width elements like TitleBar). Skip them.
+  if (parentCornerRadius > 0 && !isRoot && !(node as any)._isFlattened) {
     const nx = Math.round(node.x);
     const ny = Math.round(node.y);
-    const nw = Math.round(effectiveW);
-    const nh = Math.round(effectiveH);
+    const nw = Math.round(geoW);
+    const nh = Math.round(geoH);
     const pw = Math.round(parentWidth);
     const ph = Math.round(parentHeight);
     // Check if the node hugs the parent's edges (within 5px tolerance)
@@ -452,12 +484,29 @@ function emitDynamicTextNode(
     anchorXml = (ax !== 0 || ay !== 0) ? `<Vector2 name="AnchorPoint"><X>${ax}</X><Y>${ay}</Y></Vector2>` : '';
   }
 
-  // ── GENERIC RULE: HUG text in centered auto-layout → CENTER alignment ──
-  // In Figma, HUG text + centered auto-layout = visually centered (text box fits content exactly).
-  // In Roblox, font rendering differs so the auto-sized box may not exactly fit, making LEFT visible.
+  // ── GENERIC RULE: Text in centered auto-layout → CENTER alignment ──
+  // Two cases where Figma CENTER cross-axis doesn't translate to Roblox automatically:
+  //
+  // 1. HUG text: box fits content exactly in Figma, but Roblox font metrics differ
+  //    so the auto-sized box may not match, making LEFT alignment visible.
+  //
+  // 2. FILL text: text fills parent width (XS=1). In Figma, CENTER cross-axis
+  //    visually centers the text because the parent itself is centered. But in Roblox,
+  //    the TextLabel fills the parent → TextXAlignment must be CENTER for text to
+  //    appear centered within the filled label. Without this, prices like "$5,000"
+  //    in centered BuyBtn containers render LEFT-aligned.
   let effectiveHAlign = ts?.textAlignHorizontal ?? ts?.textAlign ?? node.textAlignHorizontal ?? 'LEFT';
-  if (isHugText && parentHasAutoLayout && effectiveHAlign === 'LEFT') {
-    effectiveHAlign = 'CENTER';
+  if (parentHasAutoLayout && effectiveHAlign === 'LEFT') {
+    // Case 1: HUG text in centered layout
+    if (isHugText) {
+      effectiveHAlign = 'CENTER';
+    }
+    // Case 2: FILL text in centered cross-axis layout
+    // When text fills parent width AND parent's cross-axis centers children,
+    // the text content itself must be centered within the TextLabel.
+    if (!isHugText && node.layoutSizingHorizontal === 'FILL') {
+      effectiveHAlign = 'CENTER';
+    }
   }
 
   const lines: string[] = [
@@ -770,8 +819,12 @@ function emitContainerNode(
     lines.push(`<Item class="UIListLayout" referent="${llRef}"><Properties>`);
     lines.push(`<token name="FillDirection">${al.fillDirection === 'Horizontal' ? 0 : 1}</token>`);
     lines.push(`<UDim name="Padding"><S>0</S><O>${al.padding || 0}</O></UDim>`);
-    lines.push(`<token name="HorizontalAlignment">${al.horizontalAlignment === 'Center' ? 1 : (al.horizontalAlignment === 'Right' ? 2 : 0)}</token>`);
-    lines.push(`<token name="VerticalAlignment">${al.verticalAlignment === 'Center' ? 1 : (al.verticalAlignment === 'Bottom' ? 2 : 0)}</token>`);
+    // Roblox HorizontalAlignment enum: Center=0, Left=1, Right=2  (NOT Left=0!)
+    // Roblox VerticalAlignment enum:   Center=0, Top=1,  Bottom=2  (NOT Top=0!)
+    const hAlignToken: Record<string, number> = { Center: 0, Left: 1, Right: 2 };
+    const vAlignToken: Record<string, number> = { Center: 0, Top: 1, Bottom: 2 };
+    lines.push(`<token name="HorizontalAlignment">${hAlignToken[al.horizontalAlignment] ?? 1}</token>`);
+    lines.push(`<token name="VerticalAlignment">${vAlignToken[al.verticalAlignment] ?? 1}</token>`);
     lines.push(`<token name="SortOrder">2</token>`); // LayoutOrder
     if (al.wraps) {
       lines.push(`<bool name="Wraps">true</bool>`);
