@@ -151,8 +151,11 @@ async function main() {
         let exportNode = node;
         let cloneToDelete = null;
         if (!isFlatten && 'children' in node && node.children && node.children.length > 0) {
-          // Clone the frame to get an independent copy
-          const clone = node.clone();
+           // Clone the frame to get an independent copy
+           let clone = node.clone();
+           // CRITICAL: INSTANCE clones have read-only children (owned by component definition).
+           // detachInstance() returns a NEW FrameNode — must capture it (old ref is invalidated).
+           if (clone.type === 'INSTANCE') clone = clone.detachInstance();
           // Disable auto-layout so removing children doesn't collapse the frame
           if ('layoutMode' in clone) clone.layoutMode = 'NONE';
           // Force the clone to match the original frame dimensions
@@ -228,6 +231,8 @@ async function main() {
             var shadowKey = 'shadow_' + node.id.replace(/:/g, '_');
             try {
               var shadowClone = node.clone();
+              // CRITICAL: INSTANCE clones have read-only children
+              if (shadowClone.type === 'INSTANCE') shadowClone = shadowClone.detachInstance();
               if ('layoutMode' in shadowClone) shadowClone.layoutMode = 'NONE';
               shadowClone.resize(node.width, node.height);
               // Remove ALL children

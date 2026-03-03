@@ -926,21 +926,6 @@ async function exportRasterNodes() {
     return result;
   }
 
-  async function hideTextDescendants(node) {
-    const hidden = [];
-    async function walk(n) {
-      if (n.type === 'TEXT' && n.visible) {
-        // Always hide ALL text during container raster — text is emitted as TextLabel separately
-        n.visible = false;
-        hidden.push(n);
-      } else if ('children' in n && n.children) {
-        for (const c of n.children) await walk(c);
-      }
-    }
-    await walk(node);
-    return hidden;
-  }
-
   for (const entry of entries) {
     try {
       const node = await figma.getNodeByIdAsync(entry.nodeId);
@@ -955,26 +940,61 @@ async function exportRasterNodes() {
         continue;
       }
 
-      // Hybrid: hide ALL children (not just text) so only background is captured
-      let hidden = [];
-      if (entry.isHybrid) {
-        if ('children' in node && node.children) {
-          for (const c of node.children) {
-            if (c.visible) {
-              c.visible = false;
-              hidden.push(c);
-            }
+      // CRITICAL: Neither opacity=0 NOR visible=false work with Figma's exportAsync!
+      // Both still render children in the output. PROVEN: original=102KB vs clone-stripped=79KB.
+      // The ONLY reliable approach: clone the node, remove children, export BG-only clone.
+      let exportTarget = node;
+      let cloneToCleanup = null;
+
+      if (entry.isHybrid && 'children' in node && node.children && node.children.length > 0) {
+        let clone = node.clone();
+        // CRITICAL: INSTANCE clones have read-only children (owned by component definition).
+        // detachInstance() returns a NEW FrameNode — must capture it (old ref is invalidated).
+        if (clone.type === 'INSTANCE') clone = clone.detachInstance();
+        // Disable auto-layout so removing children doesn't collapse the frame
+        if ('layoutMode' in clone) clone.layoutMode = 'NONE';
+        // Force dimensions to match original
+        clone.resize(node.width, node.height);
+        // Strip all children — only frame fills/strokes remain
+        while (clone.children.length > 0) clone.children[0].remove();
+
+        // ── SMART SELECTIVE STRIPPING for hybrid _BG clones ──
+        // Strip ONLY properties that cause transparent padding in exportAsync.
+        // Keep properties that render INSIDE the frame (part of visual design).
+
+        // 1. CornerRadius → KEEP on clone (PNG renders with smooth rounded corners)
+        //    Roblox UICorner clips to same radius — result is clean smooth corners
+
+        // 2. Effects → strip only OUTER effects (DROP_SHADOW, LAYER_BLUR)
+        //    Keep INNER_SHADOW and BACKGROUND_BLUR (render inside frame)
+        if ('effects' in clone && clone.effects && clone.effects.length > 0) {
+          clone.effects = clone.effects.filter(function(e) {
+            return e.type === 'INNER_SHADOW' || e.type === 'BACKGROUND_BLUR';
+          });
+        }
+
+        // 3. Strokes → strip only CENTER/OUTSIDE (expand bounds)
+        //    Keep INSIDE strokes (card borders — part of visual design)
+        if ('strokes' in clone && clone.strokes && clone.strokes.length > 0) {
+          var align = ('strokeAlign' in clone) ? clone.strokeAlign : 'CENTER';
+          if (align !== 'INSIDE') {
+            clone.strokes = [];
+            if ('strokeWeight' in clone) clone.strokeWeight = 0;
           }
         }
-        console.log('[FigmaForge:Raster] Hidden ' + hidden.length + ' children for hybrid: ' + node.name);
-        // CRITICAL: Figma render pipeline needs a tick to process visibility changes
+
         await new Promise(function(r) { setTimeout(r, 100); });
+        exportTarget = clone;
+        cloneToCleanup = clone;
+        console.log('[FigmaForge:Raster] Clone+strip: removed ' + node.children.length + ' children for hybrid: ' + node.name);
       }
 
-      const pngBytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: ${scale} } });
+      const pngBytes = await exportTarget.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: ${scale} } });
 
-      // Restore
-      for (const n of hidden) n.visible = true;
+      // Cleanup clone
+      if (cloneToCleanup) {
+        cloneToCleanup.remove();
+      }
 
       exportedImages[entry.rasterHash] = uint8ToBase64(pngBytes);
       exported++;
